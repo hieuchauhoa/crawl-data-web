@@ -53,20 +53,24 @@ function ExtractedPreview({ item }: { item: CrawlQueueItem }) {
       <button type="button" className="small secondary">{open ? "Thu gọn" : "Xem"}</button>
     </div>
     {open && <div className="preview-body">
-      {fieldEntries.length > 0 && <div className="preview-section">
-        <span className="preview-section-title">Trường dữ liệu ({fieldEntries.length})</span>
-        {fieldEntries.map(([key, value]) => <div key={key} className="preview-row"><span>{key}</span><code>{truncate(value)}</code></div>)}
-      </div>}
-      <div className="preview-section">
-        <span className="preview-section-title">SEO (tự động đọc)</span>
-        <div className="preview-row"><span>Title</span><code>{truncate(seo.title)}</code></div>
-        <div className="preview-row"><span>Description</span><code>{truncate(seo.description)}</code></div>
-        <div className="preview-row"><span>Keywords</span><code>{seo.keywords ? truncate(seo.keywords) : <em>không có trên trang nguồn — sẽ để trống, không tự bịa</em>}</code></div>
+      <div className="preview-col">
+        {fieldEntries.length > 0 && <div className="preview-section">
+          <span className="preview-section-title">Trường dữ liệu ({fieldEntries.length})</span>
+          {fieldEntries.map(([key, value]) => <div key={key} className="preview-row"><span>{key}</span><code>{truncate(value)}</code></div>)}
+        </div>}
       </div>
-      {breadcrumb.length > 0 && <div className="preview-section">
-        <span className="preview-section-title">Breadcrumb / Category tìm được</span>
-        <div className="preview-crumbs">{breadcrumb.map(b => <span key={b.index} className="crumb-chip">{b.text}</span>)}</div>
-      </div>}
+      <div className="preview-col">
+        <div className="preview-section">
+          <span className="preview-section-title">SEO (tự động đọc)</span>
+          <div className="preview-row"><span>Title</span><code>{truncate(seo.title)}</code></div>
+          <div className="preview-row"><span>Description</span><code>{truncate(seo.description)}</code></div>
+          <div className="preview-row"><span>Keywords</span><code>{seo.keywords ? truncate(seo.keywords) : <em>không có trên trang nguồn — sẽ để trống, không tự bịa</em>}</code></div>
+        </div>
+        {breadcrumb.length > 0 && <div className="preview-section">
+          <span className="preview-section-title">Breadcrumb / Category tìm được</span>
+          <div className="preview-crumbs">{breadcrumb.map(b => <span key={b.index} className="crumb-chip">{b.text}</span>)}</div>
+        </div>}
+      </div>
     </div>}
   </div>;
 }
@@ -287,6 +291,7 @@ function App() {
   const [crawl, setCrawl] = useState<CrawlRuntimeState>({ activeRunId: null, runs: [] });
   const [crawlWorkers, setCrawlWorkers] = useState(4);
   const [seoTable, setSeoTable] = useState("");
+  const [seoCustomizing, setSeoCustomizing] = useState(false);
   const [seoParentColumn, setSeoParentColumn] = useState("");
   const [seoComColumn, setSeoComColumn] = useState("");
   const [seoActColumn, setSeoActColumn] = useState("");
@@ -528,6 +533,13 @@ function App() {
 
   const recipeReady = (id: string) => crawl.runs.some(x => x.recipeId === id && x.mode === "test" && x.status === "completed" && x.queue.some(q => q.status === "success"));
   const step = !db ? 1 : !db.config.mainTable ? 2 : state.recipes.length === 0 ? 3 : !state.recipes.some(r => recipeReady(r.id)) ? 4 : 5;
+  // Steps behind the current one collapse to a one-line summary — the operator's attention should be on
+  // the step they're actually working on, not scrolling past finished setup to reach it. "Sửa" opens a
+  // finished step back up without losing anything (nothing here is destroyed, just hidden); toggled per
+  // step number so re-opening step 1 doesn't also re-open step 2.
+  const [forceOpenSteps, setForceOpenSteps] = useState<Set<number>>(new Set());
+  const isStepCollapsed = (n: number) => n < step && !forceOpenSteps.has(n);
+  const toggleForceOpen = (n: number) => setForceOpenSteps(prev => { const next = new Set(prev); if (next.has(n)) next.delete(n); else next.add(n); return next; });
 
   return <main className="shell simple-shell">
     <header className="simple-hero">
@@ -541,7 +553,10 @@ function App() {
     {error && <div className="alert"><strong>Có lỗi cần xử lý</strong><span>{error}</span></div>}
 
     <section className={`flow-card ${step === 1 ? "focus" : ""}`}>
-      <div className="flow-title"><span className="flow-number">1</span><div><h2>Chọn file SQL của website mới</h2><p>Chỉ cần chọn file và bấm Import. File gốc không bị sửa.</p></div>{db && <Badge ok={true}>Đã xong</Badge>}</div>
+      <div className="flow-title"><span className="flow-number">1</span><div><h2>Chọn file SQL của website mới</h2><p>Chỉ cần chọn file và bấm Import. File gốc không bị sửa.</p></div>{db && <Badge ok={true}>Đã xong</Badge>}{db && isStepCollapsed(1) && <button type="button" className="small secondary" onClick={() => toggleForceOpen(1)}>Sửa</button>}</div>
+      {isStepCollapsed(1) && db
+        ? <div className="auto-summary"><span>Đã import <code>{db.originalName}</code> · {db.schema.tables.length} bảng · DB: <code>{db.database}</code></span></div>
+        : <>
       {!db ? <div className="upload-box"><input type="file" accept=".sql" onChange={e => setSqlFile(e.target.files?.[0] || null)} /><button className="primary-large" disabled={!sqlFile || !!busy || !health?.mariadb.ok} onClick={importSql}>{busy === "import" ? "Đang import…" : "Import SQL"}</button></div> : <div className="success-line">
         <div>
           <div><strong>{db.originalName}</strong><span>{db.schema.tables.length} bảng đã đọc</span></div>
@@ -552,10 +567,15 @@ function App() {
         </div>
         <button className="small secondary" disabled={!!busy} onClick={clearWorkspace}>Đổi sang SQL khác</button>
       </div>}
+      {db && forceOpenSteps.has(1) && step > 1 && <button type="button" className="small secondary" style={{ marginTop: 10 }} onClick={() => toggleForceOpen(1)}>Xong, thu gọn lại</button>}
+      </>}
     </section>
 
     {db && <section className={`flow-card ${step === 2 ? "focus" : ""}`}>
-      <div className="flow-title"><span className="flow-number">2</span><div><h2>Chọn dữ liệu sẽ đưa vào</h2><p>Chọn bảng chính trước. Bảng phụ chỉ chọn khi sản phẩm/bài viết có liên quan tới bảng đó.</p></div>{db.config.mainTable && <Badge ok={true}>Đã chọn</Badge>}</div>
+      <div className="flow-title"><span className="flow-number">2</span><div><h2>Chọn dữ liệu sẽ đưa vào</h2><p>Chọn bảng chính trước. Bảng phụ chỉ chọn khi sản phẩm/bài viết có liên quan tới bảng đó.</p></div>{db.config.mainTable && <Badge ok={true}>Đã chọn</Badge>}{db.config.mainTable && isStepCollapsed(2) && <button type="button" className="small secondary" onClick={() => toggleForceOpen(2)}>Sửa</button>}</div>
+      {isStepCollapsed(2)
+        ? <div className="auto-summary"><span>Bảng chính: <code>{db.config.mainTable}</code>{db.config.relatedTables.length ? ` · ${db.config.relatedTables.length} bảng phụ` : ""}</span></div>
+        : <>
       <SubSection title="Bảng chính & bảng phụ">
         <div className="simple-grid">
           <label className="choice-box"><span>Bảng chính</span><select value={db.config.mainTable || ""} onChange={e => { const nextMain = e.target.value || null; const nextRelated = db.config.relatedTables.filter(t => t !== nextMain); const allowed = new Set(nextMain ? [nextMain, ...nextRelated] : nextRelated); saveConfig({ mainTable: nextMain, relatedTables: nextRelated, relations: db.config.relations.filter(r => allowed.has(r.sourceTable) && allowed.has(r.targetTable)) }); }}><option value="">— Chọn bảng chính —</option>{db.schema.tables.map(t => <option key={t.name}>{t.name}</option>)}</select><small>Ví dụ: bmws_product hoặc bmws_news</small></label>
@@ -566,38 +586,53 @@ function App() {
       {selectedTables.length > 1 && <SubSection title="Quan hệ giữa các bảng" hint="Ví dụ: product.id_list → product_list.id. Nếu không cần bảng phụ thì có thể bỏ qua.">
         <details className="relation-simple"><summary>Thiết lập liên kết <b>({db.config.relations.length})</b></summary><div className="relation-builder"><div className="relation-side"><span className="side-title">Từ cột</span><select value={sourceTable} onChange={e => setSourceTable(e.target.value)}>{selectedTables.map(t => <option key={t}>{t}</option>)}</select><select value={sourceColumn} onChange={e => setSourceColumn(e.target.value)}>{(sourceSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></div><div className="relation-arrow">→</div><div className="relation-side"><span className="side-title">Sang cột</span><select value={targetTable} onChange={e => setTargetTable(e.target.value)}>{selectedTables.filter(t => t !== sourceTable).map(t => <option key={t}>{t}</option>)}</select><select value={targetColumn} onChange={e => setTargetColumn(e.target.value)}>{(targetSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></div><button disabled={!!busy || !targetTable} onClick={addRelation}>Thêm liên kết</button></div>{autoSuggestion && <div className="suggestion-hint"><div><strong>Hệ thống gợi ý:</strong> <code>{autoSuggestion.sourceTable}.{autoSuggestion.sourceColumn}</code> → <code>{autoSuggestion.targetTable}.{autoSuggestion.targetColumn}</code></div><button className="small secondary" onClick={applySuggestion}>Dùng gợi ý</button></div>}<div className="confirmed-relations">{db.config.relations.map((r, i) => <div className="confirmed-relation" key={r.id}><span className="relation-number">{i + 1}</span><div><strong>{r.sourceTable}.{r.sourceColumn}</strong><span>→</span><strong>{r.targetTable}.{r.targetColumn}</strong></div><button className="small danger" onClick={() => removeRelation(r.id)}>Xóa</button></div>)}</div></details>
       </SubSection>}
+      {forceOpenSteps.has(2) && step > 2 && <button type="button" className="small secondary" style={{ marginTop: 14 }} onClick={() => toggleForceOpen(2)}>Xong, thu gọn lại</button>}
+      </>}
     </section>}
 
     <section className={`flow-card ${step === 3 ? "focus" : ""}`}>
-      <div className="flow-title"><span className="flow-number">3</span><div><h2>Dạy crawler bằng Chrome Extension</h2><p>Trên website cũ, chỉ cần chọn: khối item → link chi tiết → ảnh → nội dung → phân trang. SEO tự lấy.</p></div>{state.recipes.length > 0 && <Badge ok={true}>{state.recipes.length} cấu hình</Badge>}</div>
+      <div className="flow-title"><span className="flow-number">3</span><div><h2>Dạy crawler bằng Chrome Extension</h2><p>Trên website cũ, chỉ cần chọn: khối item → link chi tiết → ảnh → nội dung → phân trang. SEO tự lấy.</p></div>{state.recipes.length > 0 && <Badge ok={true}>{state.recipes.length} cấu hình</Badge>}{state.recipes.length > 0 && isStepCollapsed(3) && <button type="button" className="small secondary" onClick={() => toggleForceOpen(3)}>Sửa</button>}</div>
+      {isStepCollapsed(3)
+        ? <div className="auto-summary"><span>{state.recipes.length} cấu hình crawl đã lưu</span></div>
+        : <>
       {state.recipes.length === 0 ? <div className="instruction"><strong>Chưa có cấu hình crawl.</strong><span>Mở website nguồn bằng Chrome, bật Extension và làm theo từng bước trên panel.</span></div> : <div className="recipe-list">{state.recipes.map(r => <div className="recipe-row-wrap" key={r.id}>
         <div className="recipe-row"><div><strong>{r.name}</strong><span>{r.hostname}{r.source.listPath}</span></div><div className="recipe-tags"><span>{r.detail.fields.length} trường chi tiết</span><span>{r.list.pagination.kind === "none" ? "1 trang / không paging" : "Có phân trang"}</span><span>SEO tự động</span><button className="small danger" disabled={!!busy} onClick={() => deleteRecipeAction(r.id)}>Xóa</button></div></div>
         {db && <DefaultValueEditor recipe={r} db={db} onSaved={refresh} />}
       </div>)}</div>}
+      {forceOpenSteps.has(3) && step > 3 && <button type="button" className="small secondary" style={{ marginTop: 14 }} onClick={() => toggleForceOpen(3)}>Xong, thu gọn lại</button>}
+      </>}
     </section>
 
     <section className={`flow-card ${step === 4 || step === 5 ? "focus" : ""}`}>
       <div className="flow-title"><span className="flow-number">4</span><div><h2>Chạy thử 1 item rồi mới crawl toàn bộ</h2><p>Đây là màn hình bạn sẽ dùng nhiều nhất. Nếu test thành công, nút Crawl toàn bộ tự mở.</p></div><label className="worker-control"><span>Workers</span><select value={crawlWorkers} onChange={e => setCrawlWorkers(Number(e.target.value))}>{[1,2,3,4,5,6,7,8].map(n => <option key={n} value={n}>{n}{n === 4 ? " — khuyên dùng" : ""}</option>)}</select></label></div>
-      {state.recipes.length === 0 ? <div className="instruction"><strong>Chưa thể test.</strong><span>Hãy hoàn thành bước 3 trước.</span></div> : <div className="crawl-recipes">{state.recipes.map(r => { const passed = recipeReady(r.id); return <div className="crawl-recipe" key={r.id}><div className="crawl-recipe-info"><strong>{r.name}</strong><span>{r.hostname}{r.source.listPath}</span></div><div className="crawl-cta"><button className="primary-large" disabled={!!busy} onClick={() => startCrawl(r.id, "test")}>{passed ? "Test lại 1 item" : "Test 1 item"}</button><button className="success-button" disabled={!!busy || !passed} onClick={() => startCrawl(r.id, "full")}>{passed ? "Crawl toàn bộ" : "Crawl toàn bộ — cần Test trước"}</button></div>{passed && <div className="test-passed">✓ Test thành công — có thể chạy toàn bộ</div>}</div>; })}</div>}
+      {state.recipes.length === 0 ? <div className="instruction"><strong>Chưa thể test.</strong><span>Hãy hoàn thành bước 3 trước.</span></div> : <div className="crawl-recipes">{state.recipes.map(r => { const passed = recipeReady(r.id); return <div className="crawl-recipe" key={r.id}><div className="crawl-recipe-info"><strong>{r.name}</strong><span>{r.hostname}{r.source.listPath}</span></div><div className="crawl-cta"><button className={passed ? "secondary" : "primary-large"} disabled={!!busy} onClick={() => startCrawl(r.id, "test")}>{passed ? "Test lại 1 item" : "Test 1 item"}</button><button className="success-button" disabled={!!busy || !passed} onClick={() => startCrawl(r.id, "full")}>{passed ? "Crawl toàn bộ" : "Crawl toàn bộ — cần Test trước"}</button></div>{passed && <div className="test-passed">✓ Test thành công — có thể chạy toàn bộ</div>}</div>; })}</div>}
       <div className="runs-stack">{crawl.runs.slice().reverse().slice(0, 5).map(run => <RunCard key={run.id} run={run} onAction={runAction} onDelete={deleteCrawlRunAction} canImport={!!db?.config.seo} importBusy={importBusyId === run.id} importRuns={importRuns} rollbackBusyId={rollbackBusyId} onImport={runImport} onRollback={rollbackImportAction} />)}</div>
     </section>
 
     {db?.config.mainTable && <section className="flow-card">
       <div className="flow-title"><span className="flow-number">5</span><div><h2>Cấu hình SEO, ảnh &amp; bản ghi đã tồn tại</h2><p>Bắt buộc trước khi đưa dữ liệu vào Database — dữ liệu SEO gốc luôn được ưu tiên, không tự bịa keyword.</p></div>{db.config.seo && <Badge ok={true}>Đã lưu</Badge>}</div>
       <SubSection title="Cấu hình SEO">
-        <div className="mapping-grid">
-          <label>Bảng SEO<select value={seoTable} onChange={e => { setSeoTable(e.target.value); setSeoComColumn(""); setSeoActColumn(""); setSeoTypeColumn(""); setSeoParentColumn(""); setSeoTitleColumn(""); setSeoDescColumn(""); setSeoKeywordsColumn(""); }}><option value="">— Chọn bảng —</option>{db.schema.tables.filter(t => t.name !== db.config.mainTable).map(t => <option key={t.name}>{t.name}</option>)}</select></label>
-          <label>Cột id_parent<select value={seoParentColumn} onChange={e => setSeoParentColumn(e.target.value)}><option value="">—</option>{(seoSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></label>
-          <label>Cột com<select value={seoComColumn} onChange={e => setSeoComColumn(e.target.value)}><option value="">—</option>{(seoSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></label>
-          <label>Cột act<select value={seoActColumn} onChange={e => setSeoActColumn(e.target.value)}><option value="">—</option>{(seoSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></label>
-          <label>Cột type<select value={seoTypeColumn} onChange={e => setSeoTypeColumn(e.target.value)}><option value="">—</option>{(seoSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></label>
-          <label>Giá trị com<input type="text" value={seoComValue} onChange={e => setSeoComValue(e.target.value)} placeholder="vd: product" /></label>
-          <label>Giá trị act<input type="text" value={seoActValue} onChange={e => setSeoActValue(e.target.value)} placeholder="vd: man" /></label>
-          <label>Giá trị type<input type="text" value={seoTypeValue} onChange={e => setSeoTypeValue(e.target.value)} placeholder="vd: san-pham" /></label>
-          <label>Cột title (tuỳ chọn)<select value={seoTitleColumn} onChange={e => setSeoTitleColumn(e.target.value)}><option value="">— Không dùng —</option>{(seoSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></label>
-          <label>Cột description (tuỳ chọn)<select value={seoDescColumn} onChange={e => setSeoDescColumn(e.target.value)}><option value="">— Không dùng —</option>{(seoSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></label>
-          <label>Cột keywords (tuỳ chọn)<select value={seoKeywordsColumn} onChange={e => setSeoKeywordsColumn(e.target.value)}><option value="">— Không dùng —</option>{(seoSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></label>
-        </div>
+        {seoTable && !seoCustomizing
+          ? <div className="auto-summary">
+              <span>SEO: tự động ánh xạ vào bảng <code>{seoTable}</code> ({[seoParentColumn, seoComColumn, seoActColumn, seoTypeColumn, seoTitleColumn, seoDescColumn, seoKeywordsColumn].filter(Boolean).length} trường)</span>
+              <button type="button" className="small secondary" onClick={() => setSeoCustomizing(true)}>Tuỳ chỉnh lại</button>
+            </div>
+          : <>
+              <div className="mapping-grid">
+                <label>Bảng SEO<select value={seoTable} onChange={e => { setSeoTable(e.target.value); setSeoComColumn(""); setSeoActColumn(""); setSeoTypeColumn(""); setSeoParentColumn(""); setSeoTitleColumn(""); setSeoDescColumn(""); setSeoKeywordsColumn(""); }}><option value="">— Chọn bảng —</option>{db.schema.tables.filter(t => t.name !== db.config.mainTable).map(t => <option key={t.name}>{t.name}</option>)}</select></label>
+                <label>Cột id_parent<select value={seoParentColumn} onChange={e => setSeoParentColumn(e.target.value)}><option value="">—</option>{(seoSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></label>
+                <label>Cột com<select value={seoComColumn} onChange={e => setSeoComColumn(e.target.value)}><option value="">—</option>{(seoSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></label>
+                <label>Cột act<select value={seoActColumn} onChange={e => setSeoActColumn(e.target.value)}><option value="">—</option>{(seoSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></label>
+                <label>Cột type<select value={seoTypeColumn} onChange={e => setSeoTypeColumn(e.target.value)}><option value="">—</option>{(seoSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></label>
+                <label>Giá trị com<input type="text" value={seoComValue} onChange={e => setSeoComValue(e.target.value)} placeholder="vd: product" /></label>
+                <label>Giá trị act<input type="text" value={seoActValue} onChange={e => setSeoActValue(e.target.value)} placeholder="vd: man" /></label>
+                <label>Giá trị type<input type="text" value={seoTypeValue} onChange={e => setSeoTypeValue(e.target.value)} placeholder="vd: san-pham" /></label>
+                <label>Cột title (tuỳ chọn)<select value={seoTitleColumn} onChange={e => setSeoTitleColumn(e.target.value)}><option value="">— Không dùng —</option>{(seoSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></label>
+                <label>Cột description (tuỳ chọn)<select value={seoDescColumn} onChange={e => setSeoDescColumn(e.target.value)}><option value="">— Không dùng —</option>{(seoSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></label>
+                <label>Cột keywords (tuỳ chọn)<select value={seoKeywordsColumn} onChange={e => setSeoKeywordsColumn(e.target.value)}><option value="">— Không dùng —</option>{(seoSchema?.columns || []).map(c => <option key={c.name}>{c.name}</option>)}</select></label>
+              </div>
+              {seoTable && <button type="button" className="small secondary" style={{ marginTop: 10 }} onClick={() => setSeoCustomizing(false)}>Xong, thu gọn lại</button>}
+            </>}
       </SubSection>
 
       <SubSection title="Ảnh sản phẩm">

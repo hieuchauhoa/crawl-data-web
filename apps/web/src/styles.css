@@ -1,12 +1,13 @@
 :root{
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", Inter, ui-sans-serif, "Segoe UI", sans-serif;
-  --bg:#ffffff; --surface:#ffffff; --surface-sunken:#f7f7f7;
-  --border:rgba(0,0,0,.09); --border-strong:rgba(0,0,0,.16); --divider:rgba(0,0,0,.08);
+  --bg:#fbfbfd; --surface:#ffffff; --surface-sunken:#f5f5f7;
+  --border:rgba(0,0,0,.05); --border-strong:rgba(0,0,0,.11); --divider:rgba(0,0,0,.07);
   --text:#1d1d1f; --text-secondary:#68686d; --text-tertiary:#98989d;
-  --accent:#0066cc; --accent-hover:#0055ad; --accent-tint:#eef4fc;
+  --accent:#0071e3; --accent-hover:#0058b0; --accent-tint:#e8f2fd;
   --success:#1a7f43; --success-tint:#eaf7ee;
   --danger:#c4291a; --danger-tint:#fbeeed;
   --warning:#9a5b00; --warning-tint:#fbf3e3;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.04); --shadow-float:0 12px 32px rgba(0,0,0,.08);
   --radius:12px; --radius-sm:8px;
   font-family:var(--font); font-synthesis:none; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
 }
@@ -31,11 +32,13 @@ h3{margin:0; font-size:13.5px; font-weight:650}
 .badge.ok{color:var(--success)} .badge.ok::before{background:var(--success)}
 .badge.bad{color:var(--danger)} .badge.bad::before{background:var(--danger)}
 
-/* ================= step progress: understated tab strip, not a dashboard widget ================= */
-.stepbar{display:flex; gap:22px; margin:28px 0 6px; border-bottom:1px solid var(--divider); overflow-x:auto}
-.step{display:flex; align-items:center; gap:7px; padding:0 0 11px; color:var(--text-tertiary); font-size:13px; font-weight:500; white-space:nowrap; border-bottom:2px solid transparent; margin-bottom:-1px}
-.step span{width:17px; height:17px; border-radius:50%; display:grid; place-items:center; background:var(--surface-sunken); font-weight:650; font-size:10px; flex-shrink:0; color:var(--text-tertiary)}
-.step.current{color:var(--text); border-bottom-color:var(--accent)}
+/* ================= step progress: a macOS-style segmented control, not a tab bar or dashboard widget.
+   One shared track with a rounded, elevated pill for whichever step is current — hierarchy comes from
+   that single elevated segment, not from color or a bottom-border indicator. ================= */
+.stepbar{display:flex; gap:2px; margin:28px 0 22px; padding:3px; background:var(--surface-sunken); border-radius:10px; overflow-x:auto}
+.step{display:flex; align-items:center; justify-content:center; gap:6px; flex:1; padding:7px 10px; color:var(--text-tertiary); font-size:12.5px; font-weight:500; white-space:nowrap; border-radius:7px; transition:background .15s,color .15s}
+.step span{width:16px; height:16px; border-radius:50%; display:grid; place-items:center; background:var(--border-strong); font-weight:650; font-size:9.5px; flex-shrink:0; color:var(--text-secondary)}
+.step.current{color:var(--text); background:var(--surface); box-shadow:var(--shadow-sm)}
 .step.current span{background:var(--accent); color:#fff}
 .step.done span{background:var(--success); color:#fff}
 .step.done{color:var(--text-secondary)}
@@ -145,7 +148,7 @@ select:focus,input:focus{outline:none; border-color:var(--accent); box-shadow:0 
 /* segmented control — the one place a button-group legitimately needs a track background */
 .mode-toggle{display:flex; gap:2px; padding:2px; background:var(--surface-sunken); border-radius:var(--radius-sm)}
 .mode-toggle button{flex:1; background:transparent; color:var(--text-secondary); font-size:12px; padding:7px 8px; border:0; border-radius:calc(var(--radius-sm) - 2px)}
-.mode-toggle button.primary{background:var(--surface); color:var(--text); box-shadow:0 1px 2px rgba(0,0,0,.1)}
+.mode-toggle button.primary{background:var(--surface); color:var(--text); box-shadow:var(--shadow-sm)}
 .mode-toggle button.secondary{background:transparent !important; border:0 !important; color:var(--text-secondary) !important; padding:7px 8px !important}
 .mode-toggle button:hover:not(.primary){color:var(--text)}
 
@@ -185,7 +188,11 @@ select:focus,input:focus{outline:none; border-color:var(--accent); box-shadow:0 
 .preview-head{display:flex; justify-content:space-between; align-items:center; gap:12px; padding:11px 14px; cursor:pointer}
 .preview-head>div{display:grid; gap:2px}
 .preview-head span{font-size:11px; color:var(--text-tertiary); word-break:break-all}
-.preview-body{padding:0 14px 14px; display:grid; gap:12px; border-top:1px solid var(--divider)}
+/* Two columns: left is the actual mapped content fields, right is the auto-detected SEO/category
+   metadata — the two things an operator checks are naturally already this split, so reading them
+   side-by-side avoids scrolling through one long stacked list to compare them. */
+.preview-body{padding:0 14px 14px; display:grid; grid-template-columns:1fr 1fr; gap:0 20px; border-top:1px solid var(--divider)}
+.preview-col{display:grid; gap:12px; align-content:start}
 .preview-section{display:grid; gap:6px; padding-top:12px}
 .preview-section-title{font-size:11px; font-weight:650; color:var(--text-tertiary); text-transform:uppercase; letter-spacing:.05em}
 .preview-row{display:grid; grid-template-columns:140px 1fr; gap:10px; padding:2px 0}
@@ -199,6 +206,11 @@ select:focus,input:focus{outline:none; border-color:var(--accent); box-shadow:0 
 .mapping-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:12px 14px}
 .mapping-grid label{display:grid; gap:4px; font-size:12px; font-weight:600; color:var(--text-secondary)}
 .mapping-grid select,.mapping-grid input{width:100%; font:inherit}
+
+/* Progressive disclosure: what the system already auto-detected, summarized to one line — the full
+   grid of dropdowns only appears once the operator actually asks to change something. */
+.auto-summary{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:11px 13px; background:var(--surface-sunken); border-radius:var(--radius-sm); font-size:12.5px; color:var(--text-secondary)}
+.auto-summary code{color:var(--text)}
 
 /* a plain settings-style row: label + switch, separated by a hairline, not a box each */
 .mapping-toggle{display:flex; align-items:flex-start; gap:12px; padding:13px 0; border-bottom:1px solid var(--divider)}
@@ -248,7 +260,7 @@ th{color:var(--text-tertiary); font-weight:600}
 
 /* ================= modal (conflict review) — a genuinely independent overlay container ================= */
 .modal-backdrop{position:fixed; inset:0; background:rgba(0,0,0,.4); z-index:1000; display:flex; align-items:center; justify-content:center; padding:20px}
-.modal-box{background:var(--surface); border-radius:var(--radius); max-width:600px; width:100%; max-height:85vh; overflow:auto; padding:24px; box-shadow:0 20px 60px rgba(0,0,0,.25)}
+.modal-box{background:var(--surface); border-radius:var(--radius); max-width:600px; width:100%; max-height:85vh; overflow:auto; padding:24px; box-shadow:var(--shadow-float)}
 .modal-box h2{margin:0 0 6px; font-size:17px}
 .conflict-bulk{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:14px 0; padding:10px 0; border-top:1px solid var(--divider); border-bottom:1px solid var(--divider); font-size:12px}
 .conflict-bulk span{font-weight:600; color:var(--text)}
@@ -261,7 +273,7 @@ th{color:var(--text-tertiary); font-weight:600}
 @media(max-width:820px){
   .simple-hero,.flow-title,.run-top{flex-direction:column}
   .status-stack{justify-content:flex-start}
-  .stepbar{gap:14px}
+  .step b{display:none}
   .simple-grid{grid-template-columns:1fr}
   .upload-box{grid-template-columns:1fr}
   .relation-builder{grid-template-columns:1fr}
@@ -275,6 +287,7 @@ th{color:var(--text-tertiary); font-weight:600}
   .count-pill{flex:1 1 33%}
   .worker-control{width:100%}
   .preview-row{grid-template-columns:1fr}
+  .preview-body{grid-template-columns:1fr}
 }
 
 /* Theme follows an explicit toggle (see ThemeToggle in main.tsx), not the OS setting — a redesign the

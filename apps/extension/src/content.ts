@@ -56,12 +56,59 @@ function boot() {
   let lastFieldItemEl: Element | null = null;
   let lastFieldTable = "";
   let lastFieldColumn = "";
+  // Live feedback for the range picker: once both mốc are chosen, this holds what the DOM Range
+  // actually spans right now, so the operator sees "0 phần tử" / a suspiciously small count on the
+  // panel BEFORE saving — the exact class of mistake that silently truncated a real article body.
+  let rangeStats: { count: number; text: string } | null = null;
+  // Collapsing to a small pill lets the operator see the underlying page uncluttered without closing
+  // the picker outright (which would drop in-progress mode/highlight state); re-expanding restores it.
+  let collapsed = false;
 
   const host = document.createElement("div");
   host.id = PANEL_ID;
   host.style.all = "initial";
   document.documentElement.appendChild(host);
   const shadow = host.attachShadow({ mode: "open" });
+
+  // Multiple boxes (one per Range.getClientRects() rect) so the highlight follows the real, possibly
+  // multi-line/multi-block shape of what will actually be extracted — a single bounding box would also
+  // cover gaps (margins between unrelated siblings) that aren't really part of the selection.
+  const rangeOverlay = document.createElement("div");
+  document.documentElement.appendChild(rangeOverlay);
+  function hideRangeOverlay() { rangeOverlay.innerHTML = ""; }
+  function showRangeOverlay(start: Element, end: Element) {
+    rangeOverlay.innerHTML = "";
+    try {
+      const r = document.createRange();
+      r.setStartAfter(start); r.setEndBefore(end);
+      for (const rect of r.getClientRects()) {
+        if (rect.width < 1 || rect.height < 1) continue;
+        const box = document.createElement("div");
+        Object.assign(box.style, {
+          position: "fixed", zIndex: "2147483645", pointerEvents: "none",
+          left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px`,
+          background: "rgba(37,99,235,.14)", outline: "1px solid rgba(37,99,235,.45)", boxSizing: "border-box"
+        });
+        rangeOverlay.appendChild(box);
+      }
+    } catch { /* leave overlay empty — the count/text preview below still warns on 0 phần tử */ }
+  }
+  function computeRangeStats(start: Element, end: Element): { count: number; text: string } {
+    try {
+      const r = document.createRange();
+      r.setStartAfter(start); r.setEndBefore(end);
+      const div = document.createElement("div");
+      div.appendChild(r.cloneContents());
+      const p = div.querySelectorAll("p").length, imgs = div.querySelectorAll("img").length;
+      const count = div.querySelectorAll("*").length;
+      const parts: string[] = [];
+      if (p) parts.push(`${p} đoạn văn <p>`);
+      if (imgs) parts.push(`${imgs} ảnh`);
+      return { count, text: parts.length ? parts.join(", ") : (count ? `${count} phần tử` : "") };
+    } catch { return { count: 0, text: "" }; }
+  }
+  window.addEventListener("scroll", () => { if (rangeStartEl && rangeEndEl) showRangeOverlay(rangeStartEl, rangeEndEl); }, { passive: true, capture: true });
+  window.addEventListener("resize", () => { if (rangeStartEl && rangeEndEl) showRangeOverlay(rangeStartEl, rangeEndEl); });
 
   const highlighter = document.createElement("div");
   Object.assign(highlighter.style, {
@@ -113,28 +160,52 @@ function boot() {
     // long card. Save and restore the scroll position across the rebuild.
     const prevScroll = shadow.querySelector(".panel")?.scrollTop || 0;
 
-    shadow.innerHTML = `<style>
-      :host{all:initial}*{box-sizing:border-box}
-      .panel{position:fixed;right:18px;top:18px;width:360px;max-height:calc(100vh - 36px);overflow:auto;overflow-x:hidden;z-index:2147483647;font:13px -apple-system,BlinkMacSystemFont,Inter,system-ui,sans-serif;color:#1d1d1f;background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:14px;box-shadow:0 10px 34px rgba(0,0,0,.16)}
-      .head{position:sticky;top:0;z-index:4;background:#fff;color:#1d1d1f;padding:13px 14px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(0,0,0,.08)}
-      .body{padding:14px}.brand{font-weight:650}.conn{font-size:11px;color:#68686d}.progress{display:flex;gap:4px;margin-bottom:14px}
-      .dot{height:3px;flex:1;background:#e5e5e5;border-radius:999px}.dot.active{background:#0066cc}.dot.done{background:#1a7f43}
-      .eyebrow{font-size:11px;color:#68686d;font-weight:650;text-transform:uppercase;letter-spacing:.06em}.title{font-size:16px;font-weight:650;margin:3px 0 6px}.help{font-size:12px;color:#68686d;line-height:1.5;margin-bottom:12px}
-      .notice{padding:9px 10px;border-radius:8px;background:#f5f5f5;color:#1d1d1f;font-size:12px;line-height:1.45;margin-bottom:10px;border-left:2px solid #0066cc}.err{background:#fbeeed;color:#c4291a;border-left-color:#c4291a}
-      .success{background:#eaf7ee;color:#1a7f43;border-left-color:#1a7f43}.card{border-top:1px solid rgba(0,0,0,.08);padding-top:10px;margin-top:12px}.card b{display:block;margin-bottom:5px;font-weight:650}
-      button,select,input{width:100%;font:13px inherit;border:1px solid rgba(0,0,0,.16);border-radius:8px;background:#fff;padding:9px 10px;color:#1d1d1f;min-height:38px}
+    const sharedVars = `
+      :host{
+        all:initial;
+        --hud-bg:rgba(255,255,255,.85); --hud-head-bg:rgba(255,255,255,.7); --hud-text:#1d1d1f; --hud-muted:#68686d;
+        --hud-border:rgba(0,0,0,.1); --hud-divider:rgba(0,0,0,.08); --hud-surface:#f5f5f5; --hud-input-bg:rgba(255,255,255,.6);
+        --hud-accent:#0066cc; --hud-success:#1a7f43; --hud-success-tint:#eaf7ee; --hud-danger:#c4291a; --hud-danger-tint:#fbeeed;
+      }
+      @media (prefers-color-scheme:dark){:host{
+        --hud-bg:rgba(30,30,32,.85); --hud-head-bg:rgba(30,30,32,.7); --hud-text:#f2f2f3; --hud-muted:#9a9a9e;
+        --hud-border:rgba(255,255,255,.14); --hud-divider:rgba(255,255,255,.1); --hud-surface:rgba(255,255,255,.06); --hud-input-bg:rgba(255,255,255,.08);
+        --hud-accent:#409cff; --hud-success:#3dd371; --hud-success-tint:rgba(61,211,113,.15); --hud-danger:#ff6259; --hud-danger-tint:rgba(255,84,73,.15);
+      }}`;
+    if (collapsed) {
+      shadow.innerHTML = `<style>${sharedVars}
+        *{box-sizing:border-box}
+        .pill{position:fixed;right:18px;top:18px;z-index:2147483647;display:flex;align-items:center;gap:7px;padding:9px 14px;border-radius:999px;background:var(--hud-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid var(--hud-border);box-shadow:0 8px 24px rgba(0,0,0,.14);color:var(--hud-text);font:13px -apple-system,BlinkMacSystemFont,Inter,system-ui,sans-serif;font-weight:600;cursor:pointer}
+        .dotstat{width:7px;height:7px;border-radius:50%;background:${connected ? "var(--hud-success)" : "var(--hud-muted)"}}
+      </style>
+      <div class="pill" data-action="expand"><span class="dotstat"></span>Crawl Builder · Bước ${step}/6</div>`;
+      bindUI(); return;
+    }
+    shadow.innerHTML = `<style>${sharedVars}
+      *{box-sizing:border-box}
+      .panel{position:fixed;right:18px;top:18px;width:360px;max-height:calc(100vh - 36px);overflow:auto;overflow-x:hidden;z-index:2147483647;font:13px -apple-system,BlinkMacSystemFont,Inter,system-ui,sans-serif;color:var(--hud-text);background:var(--hud-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid var(--hud-border);border-radius:16px;box-shadow:0 10px 34px rgba(0,0,0,.16)}
+      .head{position:sticky;top:0;z-index:4;background:var(--hud-head-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);color:var(--hud-text);padding:13px 14px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--hud-divider);border-radius:16px 16px 0 0}
+      .head-actions{display:flex;align-items:center;gap:10px}
+      .collapse-btn{width:auto;min-height:auto;padding:2px 6px;border:0;background:transparent;color:var(--hud-muted);font-size:15px;font-weight:700;cursor:pointer;line-height:1}
+      .collapse-btn:hover{color:var(--hud-text)}
+      .body{padding:14px}.brand{font-weight:650}.conn{font-size:11px;color:var(--hud-muted)}.progress{display:flex;gap:4px;margin-bottom:14px}
+      .dot{height:3px;flex:1;background:var(--hud-surface);border-radius:999px}.dot.active{background:var(--hud-accent)}.dot.done{background:var(--hud-success)}
+      .eyebrow{font-size:11px;color:var(--hud-muted);font-weight:650;text-transform:uppercase;letter-spacing:.06em}.title{font-size:16px;font-weight:650;margin:3px 0 6px}.help{font-size:12px;color:var(--hud-muted);line-height:1.5;margin-bottom:12px}
+      .notice{padding:9px 10px;border-radius:8px;background:var(--hud-surface);color:var(--hud-text);font-size:12px;line-height:1.45;margin-bottom:10px;border-left:2px solid var(--hud-accent)}.err{background:var(--hud-danger-tint);color:var(--hud-danger);border-left-color:var(--hud-danger)}
+      .success{background:var(--hud-success-tint);color:var(--hud-success);border-left-color:var(--hud-success)}.card{border-top:1px solid var(--hud-divider);padding-top:10px;margin-top:12px}.card b{display:block;margin-bottom:5px;font-weight:650}
+      button,select,input{width:100%;font:13px inherit;border:1px solid var(--hud-border);border-radius:8px;background:var(--hud-input-bg);padding:9px 10px;color:var(--hud-text);min-height:38px}
       button{cursor:pointer;font-weight:600;text-align:center;transition:background .12s}
-      button.primary{background:#0066cc;border-color:#0066cc;color:#fff}
-      button.pick{background:#fff;border-color:rgba(0,0,0,.16);color:#0066cc}button.pick:hover{background:#f5f5f5}
-      button.ghost{background:transparent;border-color:transparent;color:#68686d}button.ghost:hover{color:#1d1d1f}
-      button.danger{background:transparent;border-color:transparent;color:#c4291a}
+      button.primary{background:var(--hud-accent);border-color:var(--hud-accent);color:#fff}
+      button.pick{background:var(--hud-input-bg);border-color:var(--hud-border);color:var(--hud-accent)}button.pick:hover{background:var(--hud-surface)}
+      button.ghost{background:transparent;border-color:transparent;color:var(--hud-muted)}button.ghost:hover{color:var(--hud-text)}
+      button.danger{background:transparent;border-color:transparent;color:var(--hud-danger)}
       .row{display:flex;gap:7px}.row>*{flex:1;min-width:0}.actions{display:flex;gap:7px;margin-top:12px}.actions button{flex:1}
-      .small{font-size:11px;color:#68686d;line-height:1.45}.mono{font:11px ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.check{color:#1a7f43;font-weight:650}.label{font-size:11px;font-weight:650;color:#68686d;text-transform:uppercase;letter-spacing:.04em;margin:10px 0 4px}
-      .option{display:flex;align-items:flex-start;gap:9px;width:100%;text-align:left;padding:9px 0;border-top:1px solid rgba(0,0,0,.06)}.option:first-child{border-top:0}.option input{width:auto;min-height:auto;margin-top:2px;accent-color:#0066cc}.option strong{display:block;font-weight:600}.option span{font-size:11px;color:#68686d;font-weight:400}
-      .crumb{padding:8px 0;border-top:1px solid rgba(0,0,0,.06)}.crumb:first-child{border-top:0}.crumbtext{font-weight:600;margin-bottom:5px;white-space:normal;overflow-wrap:anywhere}.mapped{padding:7px 0;border-top:1px solid rgba(0,0,0,.06);margin-top:5px}.toolbar{display:flex;gap:2px;padding:2px;background:#f5f5f5;border-radius:8px}.toolbar button{font-size:12px;padding:7px;min-height:32px;border:0;background:transparent;color:#68686d;border-radius:6px}.toolbar button.primary{background:#fff;color:#1d1d1f;box-shadow:0 1px 2px rgba(0,0,0,.12)}.pill{display:inline-block;padding:3px 8px;border-radius:999px;background:#f5f5f5;color:#68686d;font-size:10px;margin:2px 3px 2px 0}.footerlink{margin-top:10px;text-align:center;font-size:11px;color:#68686d;cursor:pointer}
+      .small{font-size:11px;color:var(--hud-muted);line-height:1.45}.mono{font:11px ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.check{color:var(--hud-success);font-weight:650}.label{font-size:11px;font-weight:650;color:var(--hud-muted);text-transform:uppercase;letter-spacing:.04em;margin:10px 0 4px}
+      .option{display:flex;align-items:flex-start;gap:9px;width:100%;text-align:left;padding:9px 0;border-top:1px solid var(--hud-divider)}.option:first-child{border-top:0}.option input{width:auto;min-height:auto;margin-top:2px;accent-color:var(--hud-accent)}.option strong{display:block;font-weight:600}.option span{font-size:11px;color:var(--hud-muted);font-weight:400}
+      .crumb{padding:8px 0;border-top:1px solid var(--hud-divider)}.crumb:first-child{border-top:0}.crumbtext{font-weight:600;margin-bottom:5px;white-space:normal;overflow-wrap:anywhere}.mapped{padding:7px 0;border-top:1px solid var(--hud-divider);margin-top:5px}.toolbar{display:flex;gap:2px;padding:2px;background:var(--hud-surface);border-radius:8px}.toolbar button{font-size:12px;padding:7px;min-height:32px;border:0;background:transparent;color:var(--hud-muted);border-radius:6px}.toolbar button.primary{background:var(--hud-input-bg);color:var(--hud-text);box-shadow:0 1px 2px rgba(0,0,0,.12)}.pill-tag{display:inline-block;padding:3px 8px;border-radius:999px;background:var(--hud-surface);color:var(--hud-muted);font-size:10px;margin:2px 3px 2px 0}.footerlink{margin-top:10px;text-align:center;font-size:11px;color:var(--hud-muted);cursor:pointer}
     </style>
     <div class="panel">
-      <div class="head"><span class="brand">Crawl Builder</span><span class="conn">${connected ? "● Đã kết nối" : "○ Mất kết nối"}</span></div>
+      <div class="head"><span class="brand">Crawl Builder</span><div class="head-actions"><span class="conn">${connected ? "● Đã kết nối" : "○ Mất kết nối"}</span><button type="button" class="collapse-btn" data-action="collapse" title="Thu nhỏ">─</button></div></div>
       <div class="body">
         <div class="progress">${[1,2,3,4,5,6].map(n => `<div class="dot ${step===n?"active":done(n)?"done":""}"></div>`).join("")}</div>
         <div class="eyebrow">Bước ${step}/6</div>
@@ -164,11 +235,17 @@ function boot() {
       ${recipe.list.detailUrlSample ? `<div class="card"><b>Đã chọn</b><div class="mono">${esc(recipe.list.detailUrlSample)}</div></div>` : ""}
       <button class="pick" data-mode="detail-url">${recipe.list.detailUrl ? "Chọn lại link chi tiết" : "Chọn link chi tiết"}</button>`;
 
-    if (n === 3) return `
+    if (n === 3) {
+      const srcCand = recipe.list.imageCandidates.find(c => c.source === "src");
+      const hasLazyAttr = recipe.list.imageCandidates.some(c => c.source === "data-src" || c.source === "data-original");
+      const lazyDetected = recipe.list.avatar && hasLazyAttr && srcCand && PLACEHOLDER_IMG.test(srcCand.url);
+      return `
       <div class="help">Click ảnh đại diện trong card. Tool sẽ tự dò thêm ảnh lớn từ srcset, data-src, link ảnh gốc và OG.</div>
       ${recipe.list.avatar ? `<div class="notice success">✓ Đã chọn ảnh. Tìm thấy ${recipe.list.imageCandidates.length} nguồn ảnh.</div>` : ""}
+      ${lazyDetected ? `<div class="notice">🔍 Phát hiện ảnh lazy-load (src trỏ vào ảnh loading tạm, ảnh thật nằm ở data-src). Hệ thống sẽ tự động dùng đường dẫn ảnh thật khi crawl, không cần chọn lại.</div>` : ""}
       ${recipe.list.imageCandidates.length ? `<div class="card"><b>Ảnh có thể dùng</b>${recipe.list.imageCandidates.slice(0,4).map((x,i)=>`<div class="mapped"><span class="check">${i===0?"Đề xuất":"Candidate"}</span> · ${esc(x.source)} ${x.width?`· ${x.width}×${x.height||"?"}`:""}<div class="mono">${esc(x.url)}</div></div>`).join("")}</div>` : ""}
       <button class="pick" data-mode="avatar">${recipe.list.avatar ? "Chọn lại ảnh" : "Chọn ảnh đại diện"}</button>`;
+    }
 
     if (n === 4) {
       const p = recipe.list.pagination;
@@ -219,16 +296,20 @@ function boot() {
             <button data-extraction="range" class="${extraction==="range"?"primary":"ghost"}">Vùng dữ liệu</button>
           </div>
           ${extraction === "range" ? `
-            <div class="small" style="margin-top:6px">Dùng khi dữ liệu KHÔNG nằm gọn trong 1 khối/class bao quanh. Chọn 2 <b>mốc tham chiếu</b> (2 phần tử phải là anh em cùng cấp cha) — chỉ cần chúng lặp lại ổn định qua các bài, không cần là chính dữ liệu cần lấy. Tool sẽ lấy phần <b>NẰM GIỮA</b> 2 mốc — bản thân 2 mốc KHÔNG bị lấy vào dữ liệu.</div>
+            <div class="small" style="margin-top:6px">Dùng khi dữ liệu KHÔNG nằm gọn trong 1 khối/class bao quanh. Chọn 2 <b>mốc tham chiếu</b> — chỉ cần chúng lặp lại ổn định qua các bài, không cần là chính dữ liệu cần lấy, và không bắt buộc phải cùng cấp cha. Tool sẽ lấy phần <b>NẰM GIỮA</b> 2 mốc theo đúng thứ tự trên trang — bản thân 2 mốc KHÔNG bị lấy vào dữ liệu.</div>
             <div class="row" style="margin-top:7px">
               <button class="pick" data-mode="range-start">${rangeStartEl ? "✓ Đã chọn mốc trên" : "1. Chọn mốc trên"}</button>
               <button class="pick" data-mode="range-end" ${!rangeStartEl ? "disabled" : ""}>${rangeEndEl ? "✓ Đã chọn mốc dưới" : "2. Chọn mốc dưới"}</button>
             </div>
+            ${rangeStartEl && rangeEndEl && rangeStats ? (rangeStats.count === 0
+              ? `<div class="notice err" style="margin-top:7px">⚠️ 0 phần tử giữa 2 mốc — vùng này RỖNG, lưu lại sẽ mất dữ liệu. Đã tô highlight trên trang, kiểm tra lại vị trí 2 mốc trước khi lưu.</div>`
+              : `<div class="notice success" style="margin-top:7px">Đã chọn: <b>${rangeStats.count}</b> phần tử${rangeStats.text ? ` (${esc(rangeStats.text)})` : ""}. Đã tô vùng highlight trên trang — kiểm tra đúng phạm vi mong muốn trước khi lưu.</div>`
+            ) : ""}
             ${rangeStartEl && rangeEndEl ? `<div class="row" style="margin-top:7px"><button class="primary" data-action="save-range">Lưu vùng này</button><button class="ghost" data-action="clear-range">Chọn lại</button></div>` : ""}
           ` : `<button class="pick" style="margin-top:8px" data-mode="field">Chọn dữ liệu trên website</button>
             ${lastFieldEl && lastFieldTable===targetTable && lastFieldColumn===targetColumn ? `<div class="small" style="margin-top:6px">Click trúng bị hẹp hơn cả khung bao (VD dính vào 1 đoạn &lt;p&gt; con)? Bấm nút dưới để nới ra khung cha, xem preview bên dưới to dần tới khi đủ.</div><button class="ghost" style="margin-top:6px" data-action="widen-field">↑ Mở rộng lên cấp cha</button>` : ""}`}
           <div class="small" style="margin-top:7px">Đã map ${recipe.detail.fields.filter(f=>f.source==="dom").length} field từ trang này. Giá trị cố định / ngày giờ tự động: cấu hình ở Local Tool (Bước 3, mục "Giá trị mặc định cho cột"), không làm ở đây nữa.</div>
-          ${recipe.detail.fields.filter(f=>f.source==="dom").slice().reverse().slice(0,8).map(f=>`<div class="mapped"><span class="check">✓ ${esc(f.targetColumn)}</span> ← ${esc(f.extraction)}${f.scope==="list"?' <span class="pill">danh sách</span>':""}<div class="small">${esc((f.sampleValue||"").slice(0,90))}</div><button class="danger" data-delete-field="${esc(f.id)}" style="margin-top:5px;min-height:28px;padding:4px 7px;font-size:11px">Xóa field này</button></div>`).join("")}
+          ${recipe.detail.fields.filter(f=>f.source==="dom").slice().reverse().slice(0,8).map(f=>`<div class="mapped"><span class="check">✓ ${esc(f.targetColumn)}</span> ← ${esc(f.extraction)}${f.scope==="list"?' <span class="pill-tag">danh sách</span>':""}<div class="small">${esc((f.sampleValue||"").slice(0,90))}</div><button class="danger" data-delete-field="${esc(f.id)}" style="margin-top:5px;min-height:28px;padding:4px 7px;font-size:11px">Xóa field này</button></div>`).join("")}
           <div class="notice" style="margin-top:9px">Mục này thiếu trường nào so với mục khác? Cứ <b>mở một mục KHÁC</b> trên cùng website có trường đó rồi map tiếp — Tool tự nhận đúng Recipe này theo tên miền, dữ liệu map thêm sẽ cộng dồn vào cùng cấu hình, không tạo recipe mới.</div>
         </div>
         <div class="card"><b>SEO</b><div class="small">SEO tự đọc, không cần click.</div>${recipe.seo.sample?.title ? `<div class="mapped"><span class="check">✓ ${esc(recipe.seo.sample.title)}</span><div class="small">${esc(recipe.seo.sample.description||"Không có meta description")}</div></div>` : `<div class="small">Chưa đọc được SEO trên trang này.</div>`}</div>`;
@@ -285,7 +366,9 @@ function boot() {
       targetColumn = (e.target as HTMLSelectElement).value;
     });
     shadow.querySelectorAll<HTMLButtonElement>("button[data-extraction]").forEach(b => b.onclick = () => {
-      extraction = b.dataset.extraction as RecipeField["extraction"]; render();
+      extraction = b.dataset.extraction as RecipeField["extraction"];
+      if (extraction !== "range") { rangeStartEl = null; rangeEndEl = null; rangeStats = null; hideRangeOverlay(); }
+      render();
     });
     shadow.querySelectorAll<HTMLSelectElement>("select[data-crumb-target]").forEach(el => el.onchange = () => {
       const i = Number(el.dataset.crumbTarget); const c = recipe.list.breadcrumb[i]; if (!c) return;
@@ -304,6 +387,8 @@ function boot() {
     if (a === "next") { mode = "idle"; hide(); step = Math.min(6, step + 1); render(); return; }
     if (a === "local-ui") { window.open(LOCAL_UI, "_blank", "noopener,noreferrer"); return; }
     if (a === "reload") { await sync(); return; }
+    if (a === "collapse") { collapsed = true; render(); return; }
+    if (a === "expand") { collapsed = false; render(); return; }
     if (a === "toggle-page2") { showPage2Input = !showPage2Input; render(); return; }
     if (a === "single-page") { recipe.list.pagination = { kind: "none", reason: "single-page", page2Url: null }; await save(false); render(); return; }
     if (a === "infer-page2") {
@@ -315,10 +400,11 @@ function boot() {
       return;
     }
     if (a === "clear-click-target") { pendingClickSelector = null; render(); return; }
-    if (a === "clear-range") { rangeStartEl = null; rangeEndEl = null; render(); return; }
+    if (a === "clear-range") { rangeStartEl = null; rangeEndEl = null; rangeStats = null; hideRangeOverlay(); render(); return; }
     if (a === "save-range") {
       if (!rangeStartEl || !rangeEndEl) { error = "Hãy chọn đủ mốc trên và mốc dưới."; render(); return; }
       if (!targetTable || !targetColumn) { error = "Hãy chọn cột SQL trước."; render(); return; }
+      if (!rangeStats || rangeStats.count === 0) { error = "Vùng đang chọn KHÔNG có nội dung nào ở giữa 2 mốc (0 phần tử) — chắc chắn sẽ mất dữ liệu nếu lưu. Hãy chọn lại mốc, ví dụ đổi mốc dưới sang phần tử nằm SAU khối nội dung thay vì chính khối chứa nội dung."; render(); return; }
       // The two clicks can land in either visual order — normalize so "start" is always whichever one
       // actually comes first in document order, or the sibling-walk below would silently return nothing.
       const forward = !!(rangeStartEl.compareDocumentPosition(rangeEndEl) & Node.DOCUMENT_POSITION_FOLLOWING);
@@ -329,7 +415,7 @@ function boot() {
         rangeSelector: { start: strategy(first, "document"), end: strategy(last, "document") }
       };
       recipe.detail.fields = recipe.detail.fields.filter(x => !(x.targetTable === targetTable && x.targetColumn === targetColumn)).concat(f);
-      rangeStartEl = null; rangeEndEl = null;
+      rangeStartEl = null; rangeEndEl = null; rangeStats = null; hideRangeOverlay();
       await save(false); render(); return;
     }
     if (a === "widen-field") {
@@ -435,11 +521,13 @@ function boot() {
         if (onListNow && !itemEl) throw new Error("Đang ở trang danh sách — hãy click vào dữ liệu NẰM TRONG 1 item, không click ở ngoài.");
         applyFieldPick(target, itemEl, onListNow);
       } else if (mode === "range-start") {
-        rangeStartEl = target; rangeEndEl = null;
+        rangeStartEl = target; rangeEndEl = null; rangeStats = null; hideRangeOverlay();
       } else if (mode === "range-end") {
         if (!rangeStartEl) throw new Error("Hãy chọn mốc trên trước.");
         if (target === rangeStartEl) throw new Error("Mốc dưới phải khác mốc trên — hãy chọn 1 điểm khác.");
         rangeEndEl = target;
+        rangeStats = computeRangeStats(rangeStartEl, rangeEndEl);
+        showRangeOverlay(rangeStartEl, rangeEndEl);
       }
       // Picking a range endpoint only records a live element reference for the picker's own use — it
       // isn't a Recipe field yet (that only happens on "save-range", once both ends are chosen), so
@@ -599,10 +687,19 @@ function rangeHtmlPreview(start: Element, end: Element): string {
 }
 function resolveLink(el: Element){return el.closest("a[href]") as HTMLAnchorElement|null || el.querySelector("a[href]") as HTMLAnchorElement|null;}
 function resolveImageElement(el: Element){return el.closest("img") as HTMLImageElement|null || el.querySelector("img") as HTMLImageElement|null;}
+// A lazy-load library swaps this placeholder into `src` until the real image (held in data-src /
+// data-original) scrolls into view — which never happens during a quick click-to-pick, so `src` alone
+// would rank the placeholder above the real image purely because it already has decoded dimensions.
+const PLACEHOLDER_IMG = /preloader|placeholder|loading|blank\.gif|spinner|1x1|lazy-?load/i;
+function imageIsLazyPlaceholder(img: HTMLImageElement): boolean {
+  const hasLazyAttr = !!(img.getAttribute("data-src") || img.getAttribute("data-original"));
+  return hasLazyAttr && PLACEHOLDER_IMG.test(img.currentSrc || img.src || "");
+}
 function imageCandidates(img: HTMLImageElement): ImageCandidate[] {
   const out: ImageCandidate[]=[];
-  const add=(url:string|null|undefined,source:ImageCandidate["source"],w:number|null=null,h:number|null=null)=>{if(!url)return;try{const abs=new URL(url,location.href).href;if(!out.some(x=>x.url===abs))out.push({url:abs,source,width:w,height:h,score:(w||0)*(h||0)+(source==="parent-link"?500000:0)});}catch{}};
-  add(img.currentSrc||img.src,"src",img.naturalWidth||null,img.naturalHeight||null);add(img.getAttribute("data-src"),"data-src");add(img.getAttribute("data-original"),"data-original");
+  const add=(url:string|null|undefined,source:ImageCandidate["source"],w:number|null=null,h:number|null=null,penalty=0)=>{if(!url)return;try{const abs=new URL(url,location.href).href;if(!out.some(x=>x.url===abs))out.push({url:abs,source,width:w,height:h,score:(w||0)*(h||0)+(source==="parent-link"?500000:0)-penalty});}catch{}};
+  const srcIsPlaceholder = imageIsLazyPlaceholder(img);
+  add(img.currentSrc||img.src,"src",img.naturalWidth||null,img.naturalHeight||null,srcIsPlaceholder?10_000_000:0);add(img.getAttribute("data-src"),"data-src");add(img.getAttribute("data-original"),"data-original");
   for(const part of (img.getAttribute("srcset")||"").split(",")){const [u,desc]=part.trim().split(/\s+/);if(u)add(u,"srcset",desc?.endsWith("w")?Number(desc.slice(0,-1)):null,null);}
   const pic=img.closest("picture");pic?.querySelectorAll("source[srcset]").forEach(s=>{const [u]=((s as HTMLSourceElement).srcset||"").split(",").pop()!.trim().split(/\s+/);add(u,"picture");});
   const pa=img.closest("a[href]") as HTMLAnchorElement|null;if(pa&&/\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(pa.href))add(pa.href,"parent-link");

@@ -155,9 +155,12 @@ async function extractGallery(page:Page, recipe:CrawlRecipe): Promise<string[]> 
   const sel = selector(recipe.detail.gallery);
   if (!sel) return [];
   try {
+    // data-src/data-original checked BEFORE src: lazy-load libraries put a tiny placeholder (e.g.
+    // preloader.gif) in src and hold the real image in data-src until it scrolls into view, which a
+    // headless crawl never triggers — so src is only trustworthy once the lazy attributes are absent.
     const raw = await page.locator(sel).evaluateAll(els => els.map(e =>
-      (e.tagName === "IMG" ? e.getAttribute("src") || e.getAttribute("data-src") || e.getAttribute("data-original")
-        : e.querySelector("img")?.getAttribute("src") || e.querySelector("img")?.getAttribute("data-src"))
+      (e.tagName === "IMG" ? e.getAttribute("data-src") || e.getAttribute("data-original") || e.getAttribute("src")
+        : e.querySelector("img")?.getAttribute("data-src") || e.querySelector("img")?.getAttribute("data-original") || e.querySelector("img")?.getAttribute("src"))
       || (e.tagName === "A" ? e.getAttribute("href") : e.querySelector("a[href]")?.getAttribute("href"))
       || null
     ).filter((u): u is string => !!u));
@@ -270,8 +273,9 @@ async function discover(run:CrawlRun, recipe:CrawlRecipe){ run.status="discoveri
       // the same call, so their result arrays stay index-aligned with each other and with `els`.
       const [hrefsRaw, avatarsRaw, listFieldsRaw] = await Promise.all([
         p.locator(itemSel).evaluateAll((els, ds) => els.map(e => e.querySelector(ds)?.getAttribute("href") || null), detailSel),
+        // data-src/data-original before src — see extractGallery's comment above on lazy-load placeholders.
         avatarSel
-          ? p.locator(itemSel).evaluateAll((els, as) => els.map(e => e.querySelector(as)?.getAttribute("src") || e.querySelector(as)?.getAttribute("data-src") || e.querySelector(as)?.getAttribute("data-original") || null), avatarSel)
+          ? p.locator(itemSel).evaluateAll((els, as) => els.map(e => e.querySelector(as)?.getAttribute("data-src") || e.querySelector(as)?.getAttribute("data-original") || e.querySelector(as)?.getAttribute("src") || null), avatarSel)
           : Promise.resolve<Array<string|null>>([]),
         Promise.all(listFieldDefs.map(f => {
           const fSel = selector(f.selector!);
