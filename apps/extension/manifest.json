@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Crawl Data Web — Phase 2",
+  "version": "0.0.1",
+  "description": "Visual selector builder and Crawl Recipe editor for Crawl Data Web.",
+  "minimum_chrome_version": "120",
+  "host_permissions": [
+    "http://127.0.0.1:17321/*",
+    "http://localhost:17321/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*", "file:///*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    }
+  ],
+  "action": {
+    "default_title": "Crawl Data Web — Phase 2"
+  }
+}

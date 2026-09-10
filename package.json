@@ -1,0 +1,22 @@
+{
+  "name": "crawl-data-web-phase3",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22 <27"
+  },
+  "scripts": {
+    "dev": "concurrently -n server,web,extension -c auto \"npm run dev -w @crawl/server\" \"npm run dev -w @crawl/web\" \"npm run dev -w @crawl/extension\"",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "check:env": "node ./scripts/check-env.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "9.2.1",
+    "typescript": "5.9.2"
+  }
+}
