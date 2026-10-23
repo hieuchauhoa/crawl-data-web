@@ -105,15 +105,42 @@ function deriveOriginalCandidates(url: string): string[] {
   } catch { return []; }
 }
 
+type StoredAsset = Pick<AssetDownloadResult, "sha256" | "ext" | "mime" | "width" | "height" | "bytes">;
+
 export class AssetStore {
   private log: AssetDownloadResult[] = [];
+  // Source URL -> object already in the store. Re-imports read from here instead of the network:
+  // a "reused" asset used to mean "downloaded again, then found identical", so once the source site
+  // went down (or started blocking) every re-import lost all its avatars and gallery rows.
+  private urlIndex = new Map<string, StoredAsset>();
   constructor(private storeDir: string) {}
-  async init() { await fs.mkdir(this.storeDir, { recursive: true }); }
+  private get indexPath() { return path.join(this.storeDir, "url-index.json"); }
+  async init() {
+    await fs.mkdir(this.storeDir, { recursive: true });
+    try { this.urlIndex = new Map(Object.entries(JSON.parse(await fs.readFile(this.indexPath, "utf8")))); } catch {}
+  }
+  async saveIndex() { await fs.writeFile(this.indexPath, JSON.stringify(Object.fromEntries(this.urlIndex)), "utf8"); }
+  // Earlier import runs recorded every asset's source URL and hash, which rebuilds the index for a
+  // store filled before the index existed.
+  seed(results: AssetDownloadResult[]) {
+    for (const r of results) {
+      if (r.status === "error" || !r.sha256 || !r.ext || this.urlIndex.has(r.sourceUrl)) continue;
+      if (!fssync.existsSync(path.join(this.storeDir, `${r.sha256}.${r.ext}`))) continue;
+      this.urlIndex.set(r.sourceUrl, { sha256: r.sha256, ext: r.ext, mime: r.mime, width: r.width, height: r.height, bytes: r.bytes });
+    }
+  }
   getLog() { return this.log; }
 
   // Tries any derived "original" candidates first (one attempt each — these are speculative path
   // guesses), then falls back to the URL actually found on the page with the full retry budget.
   async downloadOne(url: string, kind: AssetKind, referer?: string): Promise<AssetDownloadResult> {
+    for (const key of [...deriveOriginalCandidates(url), url]) {
+      const hit = this.urlIndex.get(key);
+      if (!hit || !fssync.existsSync(path.join(this.storeDir, `${hit.sha256}.${hit.ext}`))) continue;
+      const result: AssetDownloadResult = { sourceUrl: key, kind, status: "reused", ...hit, exportName: null, error: null };
+      this.log.push(result);
+      return result;
+    }
     for (const candidate of deriveOriginalCandidates(url)) {
       const r = await this.attemptDownload(candidate, kind, referer, 1);
       if (r.status !== "error") return r;
@@ -137,6 +164,7 @@ export class AssetStore {
         let width: number | null = null, height: number | null = null;
         try { const dim = imageSize(buf); width = dim.width; height = dim.height; } catch {}
         const result: AssetDownloadResult = { sourceUrl: url, kind, status: reused ? "reused" : "downloaded", sha256, ext, mime, width, height, bytes: buf.length, exportName: null, error: null };
+        this.urlIndex.set(url, { sha256, ext, mime, width, height, bytes: buf.length });
         this.log.push(result);
         return result;
       } catch (e) { lastError = e instanceof Error ? e.message : String(e); }

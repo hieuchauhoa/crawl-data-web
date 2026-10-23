@@ -601,9 +601,19 @@ function cssEsc(s: string) { return CSS.escape(s); }
 // the selector silently matches nothing on every future crawl even though the element is right
 // there. Filtered out so the selector falls back to the element's other, structural classes.
 const VOLATILE_CLASS = /^(loaded|loading|lazyloaded|lazyload|active|hover(ed)?|selected|open|closed|visible|hidden|error|disabled|checked|focus(ed)?|current|in-view|is-visible|is-active|is-loaded)$/i;
+// Same "looks like a generated hash" check already applied to classes below, also applied to ids:
+// widget libraries (Swiper, Slick, lazy-load, etc.) commonly stamp a fresh random-looking id onto an
+// element on every page load/init (e.g. "swiper-wrapper-a194c7d02a774515"), which only ever matches
+// the one sample page the Recipe was built from and silently matches nothing on every other page.
+const UNSTABLE_TOKEN_RE = /[0-9a-f]{8,}/i;
+function isStableId(id: string) { return id.length > 0 && !UNSTABLE_TOKEN_RE.test(id); }
 function simpleSelector(el: Element, generalize = false) {
-  if (el.id && !generalize) return `#${cssEsc(el.id)}`;
-  const stable = [...el.classList].filter(c => c.length < 48 && !/[0-9a-f]{8,}/i.test(c) && !VOLATILE_CLASS.test(c)).slice(0, 3);
+  // Classes on <html>/<body> are mostly stamped by scripts at runtime (OS/feature detection such as
+  // MagicZoom's "linux-magic", Modernizr, "js"/"no-js"), so they differ between machines and are absent
+  // from the server-rendered HTML; the bare tag is always enough to anchor these two.
+  if (el === document.documentElement || el === document.body) return el.tagName.toLowerCase();
+  if (el.id && !generalize && isStableId(el.id)) return `#${cssEsc(el.id)}`;
+  const stable = [...el.classList].filter(c => c.length < 48 && !UNSTABLE_TOKEN_RE.test(c) && !VOLATILE_CLASS.test(c)).slice(0, 3);
   let s = el.tagName.toLowerCase() + stable.map(c => `.${cssEsc(c)}`).join("");
   if (generalize) return s;
   const parent = el.parentElement;
@@ -620,7 +630,7 @@ function selectorFor(el: Element, stop?: Element|null, generalizeTarget = false)
   while (cur && cur !== stop && parts.length < 6) {
     const generalizeThis = generalizeTarget && isTarget;
     parts.unshift(simpleSelector(cur, generalizeThis));
-    if (cur.id && !generalizeThis) break;
+    if (cur.id && isStableId(cur.id) && !generalizeThis) break;
     isTarget = false; cur = cur.parentElement;
   }
   return parts.join(" > ");

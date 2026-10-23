@@ -10,6 +10,7 @@ import type {
   RelationSuggestion,
   SchemaInspection,
   SqlImportResult,
+  SchemaTable,
   TableRowsResult,
   WorkspaceConfig
 } from "@crawl/shared";
@@ -141,23 +142,35 @@ export async function dropDatabase(database: string) {
   finally { await admin.end(); }
 }
 
+export function suggestRelations(tables: SchemaTable[]): RelationSuggestion[] {
+  const tableNames = tables.map(t => t.name);
+  return tables.flatMap(table => table.columns.flatMap(column => relationCandidates(tableNames, table.name, column.name)));
+}
+
 function relationCandidates(tableNames: string[], sourceTable: string, sourceColumn: string): RelationSuggestion[] {
   if (!/^id_/i.test(sourceColumn)) return [];
   const suffix = sourceColumn.replace(/^id_/, "").toLowerCase();
   const prefix = sourceTable.includes("_") ? sourceTable.split("_")[0] : "";
+  // Same table family first: table_product_cat.id_list belongs to table_product_list, never to
+  // table_news_list — scoring both the same let the news table win the sort and the category
+  // hierarchy (cấp 1 -> 2 -> 3) got suggested against the wrong family.
+  const src = sourceTable.toLowerCase();
+  const families = [src, src.replace(/_[^_]+$/, "")].filter((f, i, a) => f && a.indexOf(f) === i);
   const candidates = tableNames
     .filter(t => t !== sourceTable)
     .map(targetTable => {
       const tail = targetTable.toLowerCase().replace(new RegExp(`^${prefix}_?`), "");
       let confidence = 0;
       let reason = "";
-      if (tail === suffix) { confidence = 0.95; reason = `Tên ${sourceColumn} khớp trực tiếp bảng ${targetTable}`; }
+      if (families.some(f => targetTable.toLowerCase() === `${f}_${suffix}`)) { confidence = 0.97; reason = `Cùng nhóm bảng: ${sourceTable}.${sourceColumn} trỏ tới ${targetTable}`; }
+      else if (tail === suffix) { confidence = 0.95; reason = `Tên ${sourceColumn} khớp trực tiếp bảng ${targetTable}`; }
       else if (tail.endsWith(`_${suffix}`) || tail === `product_${suffix}` || tail === `news_${suffix}`) { confidence = 0.88; reason = `Hậu tố ${suffix} khớp bảng ${targetTable}`; }
       else if (targetTable.toLowerCase().endsWith(`_${suffix}`)) { confidence = 0.82; reason = `Tên bảng kết thúc bằng ${suffix}`; }
       return { targetTable, confidence, reason };
     })
     .filter(x => x.confidence >= 0.8)
     .sort((a, b) => b.confidence - a.confidence)
+    .filter((x, _i, all) => all[0]!.confidence < 0.97 || x.confidence >= 0.97)
     .slice(0, 2);
 
   return candidates.map((candidate, index) => ({
@@ -216,8 +229,7 @@ export async function inspectSchema(database: string): Promise<SchemaInspection>
       };
     });
 
-    const tableNames = tables.map(t => t.name);
-    const relations = tables.flatMap(table => table.columns.flatMap(column => relationCandidates(tableNames, table.name, column.name)));
+    const relations = suggestRelations(tables);
 
     return {
       database,

@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import mysql from "mysql2/promise";
 import type {
   AssetDownloadResult, CrawlQueueItem, CrawlRecipe, CrawlRun, ImportConflict, ImportDecision, ImportItemResult, ImportPreviewResult, ImportRun,
-  SchemaColumn, SchemaTable, UrlRewriteRule, WorkspaceInfo
+  RelationSuggestion, SchemaColumn, SchemaTable, UrlRewriteRule, WorkspaceInfo
 } from "@crawl/shared";
 import { config, phase4Dir } from "./config.js";
 import { applyUrlRewrite, AssetStore, assetExportName } from "./assets.js";
@@ -15,6 +15,11 @@ let runs: ImportRun[] = [];
 export async function initMappingRuntime() {
   await fs.mkdir(phase4Dir, { recursive: true });
   try { runs = JSON.parse(await fs.readFile(statePath, "utf8")); } catch { runs = []; }
+  // A run still "in progress" at startup can only mean the previous server process died mid-import;
+  // leaving completedAt empty would block its rollback forever, stranding the rows it did write.
+  const orphaned = runs.filter(r => !r.completedAt);
+  for (const r of orphaned) { r.completedAt = new Date().toISOString(); r.interrupted = true; }
+  if (orphaned.length) await persist();
 }
 async function persist() { await fs.writeFile(statePath, JSON.stringify(runs, null, 2), "utf8"); }
 export function getImportRuns() { return runs; }
@@ -186,36 +191,143 @@ type Conn = mysql.Connection;
 // find and undo exactly one run's rows without touching any other run's — without it, "wrong config,
 // re-imported without dedup, now there are duplicates" (a recurring real case) had no fix short of
 // hand-editing the database directly.
-async function logDelta(deltaLogPath: string, table: string, columns: string[], values: unknown[], importRunId: string | null) {
-  await fs.appendFile(deltaLogPath, `${JSON.stringify({ table, columns, values, importRunId, at: new Date().toISOString() })}\n`, "utf8");
+// op "update"/"delete" carry the row as it was before (`before`), so a rollback can restore an
+// overwritten or removed row instead of deleting it — deleting would destroy data this run never created.
+type DeltaOp = "insert" | "update" | "delete";
+type DeltaEntry = { table: string; columns: string[]; values: unknown[]; op?: DeltaOp; before?: Record<string, unknown> | null };
+async function logDelta(deltaLogPath: string, entry: DeltaEntry, importRunId: string | null) {
+  await fs.appendFile(deltaLogPath, `${JSON.stringify({ ...entry, op: entry.op || "insert", importRunId, at: new Date().toISOString() })}\n`, "utf8");
+}
+
+// Import and rollback both touch the delta log and the same rows; letting them overlap made a rollback
+// clicked seconds into a running import mark the run as rolled back after deleting only its first few
+// rows, leaving everything written afterwards orphaned and impossible to roll back.
+let activeOperation: { kind: "import" | "rollback"; id: string } | null = null;
+export function activeImportOperation() { return activeOperation; }
+function beginOperation(kind: "import" | "rollback", id: string) {
+  if (activeOperation) {
+    throw new Error(activeOperation.kind === "import"
+      ? "Đang có một lần Import chạy — chờ Import xong rồi mới xoá/import tiếp."
+      : "Đang xoá dữ liệu của một lần Import — chờ xong rồi thử lại.");
+  }
+  activeOperation = { kind, id };
+}
+
+type CategoryCrumb = { text: string; href: string | null };
+function normUrl(u: string) { try { const x = new URL(u); return `${x.host}${x.pathname.replace(/\/+$/, "")}`.toLowerCase(); } catch { return u.toLowerCase(); } }
+
+// The item's category crumbs, top-down, starting at the first mapped level (so "Trang chủ" /
+// "Sản phẩm" are dropped) and without the crumb that is the item itself (its own link or own name).
+function categoryChain(item: CrawlQueueItem, firstIndex: number, ownName?: string | null): CategoryCrumb[] {
+  const own = new Set([item.url, item.canonicalUrl].filter(Boolean).map(normUrl));
+  const name = ownName?.replace(/\s+/g, " ").trim().toLowerCase();
+  return (item.extracted?.breadcrumb || [])
+    .filter(b => b.index >= firstIndex && b.text.trim())
+    .sort((a, b) => a.index - b.index)
+    // A crumb's link is authoritative; the name check is only a fallback for crumbs without one,
+    // since a category may legitimately share its name with a product in it ("In Offset").
+    .filter(b => b.href ? !own.has(normUrl(b.href)) : b.text.replace(/\s+/g, " ").trim().toLowerCase() !== name)
+    .map(b => ({ text: b.text, href: b.href ?? null }));
+}
+
+// Some sites print a shortened breadcrumb on part of their products (e.g. "Sản phẩm > Group Lock Boxes
+// > item" while every other product shows "Sản phẩm > Khóa An Toàn > Group Lock Boxes > item").
+// Assigning levels by position then turns a cấp 2 category into a bogus cấp 1. Each category's link
+// identifies it across the whole crawl, so the longest parent path seen for that link anywhere is its
+// real position in the tree.
+function buildCanonicalAncestors(queue: CrawlQueueItem[], firstIndex: number): Map<string, CategoryCrumb[]> {
+  const ancestors = new Map<string, CategoryCrumb[]>();
+  for (const item of queue) {
+    if (item.status !== "success" || !item.extracted) continue;
+    const chain = categoryChain(item, firstIndex);
+    chain.forEach((crumb, i) => {
+      if (!crumb.href) return;
+      const key = normUrl(crumb.href);
+      if ((ancestors.get(key)?.length ?? -1) < i) ancestors.set(key, chain.slice(0, i));
+    });
+  }
+  return ancestors;
+}
+function completeChain(chain: CategoryCrumb[], ancestors: Map<string, CategoryCrumb[]>): CategoryCrumb[] {
+  const top = chain[0]?.href ? ancestors.get(normUrl(chain[0].href)) : undefined;
+  return top?.length ? [...top, ...chain] : chain;
+}
+
+// Column in `table` that points at a row of `target` (BM schemas: table_product_cat.id_list ->
+// table_product_list, table_product_item.id_cat -> table_product_cat), or the self-referencing parent
+// column when a hierarchy lives in one table.
+function linkColumnTo(table: SchemaTable, target: string, relations: RelationSuggestion[] = []): string | null {
+  const confirmed = relations.find(r => r.status === "confirmed" && r.sourceTable === table.name && r.targetTable === target && r.targetColumn === "id");
+  if (confirmed && findColumn(table, confirmed.sourceColumn)) return confirmed.sourceColumn;
+  if (target === table.name) return findColumnLike(table, /^(id_)?parent(_id)?$/i)?.name || null;
+  const suffix = target.split("_").pop();
+  return suffix ? findColumn(table, `id_${suffix}`)?.name || null : null;
+}
+
+// The category's own URL on the source site already is a slug that's unique there — reusing it keeps
+// the migrated site's category URLs identical, unlike a slug rebuilt from the (often repeated) name.
+function slugFromHref(href: string | null | undefined, itemUrl: string): string | null {
+  if (!href) return null;
+  try {
+    const u = new URL(href), item = new URL(itemUrl);
+    if (u.host !== item.host) return null;
+    const last = u.pathname.split("/").filter(Boolean).pop();
+    if (!last) return null;
+    const s = slugify(decodeURIComponent(last).replace(/\.(html?|php|aspx?)$/i, ""));
+    return s === "item" ? null : s;
+  } catch { return null; }
+}
+
+// PHP CMS routers of this kind resolve a bare /slug against every content table in turn, so a slug
+// has to be free across all of them — two categories both named "Băng keo chống trượt" (one per
+// parent) used to get the identical slug and one of the two pages became unreachable.
+async function uniqueSlug(conn: Conn, slugTables: SchemaTable[], column: string, base: string): Promise<string> {
+  const tables = slugTables.filter(t => t.columns.some(c => c.name === column));
+  for (let n = 1; n < 500; n++) {
+    const candidate = n === 1 ? base : `${base}-${n}`;
+    let taken = false;
+    for (const t of tables) {
+      const [rows] = await conn.query(`SELECT 1 FROM \`${t.name}\` WHERE \`${column}\` = ? LIMIT 1`, [candidate]);
+      if ((rows as unknown[]).length) { taken = true; break; }
+    }
+    if (!taken) return candidate;
+  }
+  return `${base}-${Date.now()}`;
 }
 
 async function findOrCreateCategory(
   conn: Conn, table: SchemaTable, nameColumn: string, text: string,
-  parentColumn: string | null, parentId: number | null,
+  parentLinks: Record<string, number>,
   cache: Map<string, number>, deltaLogPath: string, importRunId: string,
-  extraDefaults?: Record<string, string | null>
+  extraDefaults: Record<string, string | null> | undefined,
+  slugSource: { href: string | null | undefined; itemUrl: string; tables: SchemaTable[] }
 ): Promise<number> {
   const normalized = text.replace(/\s+/g, " ").trim();
-  const cacheKey = `${table.name}::${nameColumn}::${normalized}::${parentColumn ? parentId ?? "" : ""}`;
+  // Several content types share one category table in BM schemas (type = san-pham / dich-vu / ...);
+  // a same-named category of another type must not be reused.
+  const typeValue = extraDefaults?.type != null && findColumn(table, "type") ? extraDefaults.type : null;
+  const linkEntries = Object.entries(parentLinks).sort(([a], [b]) => a.localeCompare(b));
+  const cacheKey = `${table.name}::${nameColumn}::${normalized}::${typeValue ?? ""}::${JSON.stringify(linkEntries)}`;
   const cached = cache.get(cacheKey);
   if (cached != null) return cached;
 
   const whereParts = [`\`${nameColumn}\` = ?`];
   const params: unknown[] = [normalized];
-  if (parentColumn) { whereParts.push(`\`${parentColumn}\` <=> ?`); params.push(parentId); }
+  for (const [col, id] of linkEntries) { whereParts.push(`\`${col}\` = ?`); params.push(id); }
+  if (typeValue != null) { whereParts.push("`type` = ?"); params.push(typeValue); }
   const [rows] = await conn.query(`SELECT id FROM \`${table.name}\` WHERE ${whereParts.join(" AND ")} LIMIT 1`, params);
   const existing = (rows as Array<{ id: number }>)[0];
   if (existing) { cache.set(cacheKey, existing.id); return existing.id; }
 
   const insertCols = [nameColumn];
   const insertVals: unknown[] = [normalized];
-  if (parentColumn) { insertCols.push(parentColumn); insertVals.push(parentId); }
+  for (const [col, id] of linkEntries) { insertCols.push(col); insertVals.push(id); }
   // A category row created purely from breadcrumb text still needs its own slug filled in — templates
   // that build category URLs from it (e.g. a site's main nav) otherwise hit an undefined/blank slug on
   // every page that renders that menu, not just on the crawled item that happened to create the row.
+  const baseSlug = slugFromHref(slugSource.href, slugSource.itemUrl) || slugify(normalized);
   for (const slugCol of table.columns.filter(c => /slug/i.test(c.name) && c.name !== nameColumn)) {
-    if (!insertCols.includes(slugCol.name)) { insertCols.push(slugCol.name); insertVals.push(slugify(normalized)); }
+    if (!insertCols.includes(slugCol.name)) { insertCols.push(slugCol.name); insertVals.push(await uniqueSlug(conn, slugSource.tables, slugCol.name, baseSlug)); }
   }
   // Default-value columns configured for this table (constant/generated, via the DefaultValueEditor)
   // land here too — a category/list row is still a row in a table the recipe maps fields onto, but
@@ -229,7 +341,7 @@ async function findOrCreateCategory(
     insertVals
   );
   const insertId = (result as mysql.ResultSetHeader).insertId;
-  await logDelta(deltaLogPath, table.name, [...insertCols, "id"], [...insertVals, insertId], importRunId);
+  await logDelta(deltaLogPath, { table: table.name, columns: [...insertCols, "id"], values: [...insertVals, insertId] }, importRunId);
   cache.set(cacheKey, insertId);
   return insertId;
 }
@@ -287,34 +399,52 @@ function mariaConnConfig(workspace: WorkspaceInfo) {
 // getting it right, and ended up with duplicate rows the operator had no way to remove short of hand-
 // editing the database directly. Rolled-back entries are stripped from the log afterwards so a later
 // delta.sql export doesn't try to replay rows that no longer exist.
-export async function rollbackImportRun(workspace: WorkspaceInfo, importRun: ImportRun): Promise<{ deletedRows: number; tables: string[] }> {
-  let raw = "";
-  try { raw = await fs.readFile(workspace.deltaLogPath, "utf8"); } catch { return { deletedRows: 0, tables: [] }; }
-  const lines = raw.split("\n").filter(Boolean);
-  const mine: Array<{ table: string; id: unknown }> = [];
-  const kept: string[] = [];
-  for (const line of lines) {
-    let rec: { table: string; columns: string[]; values: unknown[]; importRunId?: string | null } | null = null;
-    try { rec = JSON.parse(line); } catch { kept.push(line); continue; }
-    if (!rec || rec.importRunId !== importRun.id) { kept.push(line); continue; }
-    const idIndex = rec.columns.indexOf("id");
-    if (idIndex >= 0) mine.push({ table: rec.table, id: rec.values[idIndex] });
-  }
-  if (!mine.length) return { deletedRows: 0, tables: [] };
-  const byTable = new Map<string, unknown[]>();
-  for (const m of mine) { if (!byTable.has(m.table)) byTable.set(m.table, []); byTable.get(m.table)!.push(m.id); }
-  const conn = await mysql.createConnection(mariaConnConfig(workspace));
-  let deletedRows = 0;
+// Entries are undone newest-first: an overwrite logs "delete old dependent rows" before "insert new
+// ones", so reversing restores the original dependents only after the new ones are gone.
+export async function rollbackImportRun(workspace: WorkspaceInfo, importRun: ImportRun): Promise<{ deletedRows: number; restoredRows: number; tables: string[] }> {
+  if (!importRun.completedAt) throw new Error("Lần Import này vẫn đang chạy — chờ chạy xong rồi mới xoá được.");
+  beginOperation("rollback", importRun.id);
   try {
-    for (const [table, ids] of byTable) {
-      const [result] = await conn.query(`DELETE FROM \`${table}\` WHERE id IN (${ids.map(() => "?").join(",")})`, ids);
-      deletedRows += (result as mysql.ResultSetHeader).affectedRows;
+    let raw = "";
+    try { raw = await fs.readFile(workspace.deltaLogPath, "utf8"); } catch { raw = ""; }
+    const lines = raw.split("\n").filter(Boolean);
+    const mine: Array<DeltaEntry & { importRunId?: string | null }> = [];
+    const kept: string[] = [];
+    for (const line of lines) {
+      let rec: (DeltaEntry & { importRunId?: string | null }) | null = null;
+      try { rec = JSON.parse(line); } catch { kept.push(line); continue; }
+      if (!rec || rec.importRunId !== importRun.id) { kept.push(line); continue; }
+      mine.push(rec);
     }
-  } finally { await conn.end(); }
-  await fs.writeFile(workspace.deltaLogPath, kept.length ? `${kept.join("\n")}\n` : "", "utf8");
-  importRun.rolledBack = true;
-  await persist();
-  return { deletedRows, tables: [...byTable.keys()] };
+    const conn = await mysql.createConnection(mariaConnConfig(workspace));
+    let deletedRows = 0, restoredRows = 0;
+    const tables = new Set<string>();
+    try {
+      for (const rec of mine.reverse()) {
+        const op = rec.op || "insert";
+        tables.add(rec.table);
+        if (op === "insert") {
+          const idIndex = rec.columns.indexOf("id");
+          if (idIndex < 0) continue;
+          const [result] = await conn.query(`DELETE FROM \`${rec.table}\` WHERE id = ?`, [rec.values[idIndex]]);
+          deletedRows += (result as mysql.ResultSetHeader).affectedRows;
+        } else if (rec.before) {
+          const cols = Object.keys(rec.before);
+          if (op === "update") {
+            const setCols = cols.filter(c => c !== "id");
+            await conn.query(`UPDATE \`${rec.table}\` SET ${setCols.map(c => `\`${c}\`=?`).join(",")} WHERE id = ?`, [...setCols.map(c => rec.before![c]), rec.before.id]);
+          } else {
+            await conn.query(`REPLACE INTO \`${rec.table}\` (${cols.map(c => `\`${c}\``).join(",")}) VALUES (${cols.map(() => "?").join(",")})`, cols.map(c => rec.before![c]));
+          }
+          restoredRows++;
+        }
+      }
+    } finally { await conn.end(); }
+    await fs.writeFile(workspace.deltaLogPath, kept.length ? `${kept.join("\n")}\n` : "", "utf8");
+    importRun.rolledBack = true;
+    await persist();
+    return { deletedRows, restoredRows, tables: [...tables] };
+  } finally { activeOperation = null; }
 }
 
 // Computes which crawled items collide with an existing row under the configured match columns,
@@ -352,14 +482,6 @@ export async function previewImportConflicts(workspace: WorkspaceInfo, recipe: C
 }
 
 export async function importCrawlRun(workspace: WorkspaceInfo, recipe: CrawlRecipe, run: CrawlRun, decisions?: Record<string, ImportDecision>): Promise<ImportRun> {
-  const importRun: ImportRun = {
-    id: randomUUID(), runId: run.id, recipeId: recipe.id, createdAt: new Date().toISOString(),
-    completedAt: null, inserted: 0, updated: 0, skipped: 0, failed: 0, insertedRows: 0,
-    assetsDownloaded: 0, assetsReused: 0, assetsFailed: 0, items: []
-  };
-  runs.push(importRun);
-  await persist();
-
   const cfg = workspace.config;
   const mainTable = cfg.mainTable;
   if (!mainTable) throw new Error("Chưa chọn main table cho workspace.");
@@ -367,12 +489,42 @@ export async function importCrawlRun(workspace: WorkspaceInfo, recipe: CrawlReci
   const mainSchema = schemaByName.get(mainTable);
   if (!mainSchema) throw new Error(`Không tìm thấy schema của bảng ${mainTable}.`);
 
+  const importRun: ImportRun = {
+    id: randomUUID(), runId: run.id, recipeId: recipe.id, createdAt: new Date().toISOString(),
+    completedAt: null, inserted: 0, updated: 0, skipped: 0, failed: 0, insertedRows: 0,
+    assetsDownloaded: 0, assetsReused: 0, assetsFailed: 0, items: []
+  };
+  beginOperation("import", importRun.id);
+  try {
+    runs.push(importRun);
+    await persist();
+    await runImport(workspace, recipe, run, decisions, importRun, mainTable, mainSchema, schemaByName);
+  } finally {
+    importRun.completedAt = new Date().toISOString();
+    activeOperation = null;
+    await persist();
+  }
+  return importRun;
+}
+
+async function runImport(
+  workspace: WorkspaceInfo, recipe: CrawlRecipe, run: CrawlRun, decisions: Record<string, ImportDecision> | undefined,
+  importRun: ImportRun, mainTable: string, mainSchema: SchemaTable, schemaByName: Map<string, SchemaTable>
+): Promise<void> {
+  const cfg = workspace.config;
   const conn = await mysql.createConnection(mariaConnConfig(workspace));
 
   const assetStore = new AssetStore(workspace.assetsStoreDir);
   await assetStore.init();
+  assetStore.seed(runs.flatMap(r => r.items.flatMap(i => i.assets)));
 
   const categoryCache = new Map<string, number>();
+  // Breadcrumb levels mapped to a category table, in order (cấp 1, 2, 3 ...). A level mapped to the
+  // main table itself is never a real category (usually the item's own title) and is skipped.
+  const categoryLevels = [...recipe.list.breadcrumb]
+    .filter(l => !l.ignored && l.targetTable && l.targetColumn && l.targetTable !== mainTable)
+    .sort((a, b) => a.index - b.index);
+  const canonicalAncestors = buildCanonicalAncestors(run.queue, categoryLevels[0]?.index ?? 0);
 
   try {
     for (const item of run.queue) {
@@ -407,27 +559,22 @@ export async function importCrawlRun(workspace: WorkspaceInfo, recipe: CrawlReci
         const lastResolvedByTable = new Map<string, number>();
         const ownNameCol = pickColumnWithValue(mainSchema, /^name/i, mainValues);
         const ownName = ownNameCol ? mainValues[ownNameCol] : null;
-        for (const level of [...recipe.list.breadcrumb].sort((a, b) => a.index - b.index)) {
-          if (level.ignored || !level.targetTable || !level.targetColumn) continue;
-          // A breadcrumb level mapped to the main table itself is never a real category — it's most
-          // often the last crumb (the item's own title, e.g. a mapping picker's default fallback) and
-          // resolving it here would look up-or-INSERT a bogus row into the main product/news table
-          // using just that one column, as a pure side effect of "categorizing" the item.
-          if (level.targetTable === mainTable) continue;
-          const crumb = item.extracted.breadcrumb.find(b => b.index === level.index);
-          if (!crumb || !crumb.text.trim()) continue;
-          // Breadcrumb selectors are position-based (e.g. "3rd breadcrumb item"); on a product whose
-          // breadcrumb has a different depth than the sample used to configure the Recipe, that same
-          // position can drift onto the item's own title instead of the intended category level. A
-          // crumb that IS the product's own name is never a real category — cheap self-consistency
-          // check catches this without needing to redesign breadcrumb selection to be depth-aware.
-          if (ownName && crumb.text.trim().toLowerCase() === ownName.trim().toLowerCase()) continue;
-          const catTable = schemaByName.get(level.targetTable);
+        const chain = completeChain(categoryChain(item, categoryLevels[0]?.index ?? 0, ownName), canonicalAncestors);
+        for (const level of categoryLevels) {
+          const crumb = chain[level.index - categoryLevels[0]!.index];
+          if (!crumb) continue;
+          const catTable = schemaByName.get(level.targetTable!);
           if (!catTable) continue;
-          const parentCol = findColumnLike(catTable, /^(id_)?parent(_id)?$/i)?.name || null;
-          const parentId = parentCol ? lastResolvedByTable.get(level.targetTable) ?? null : null;
-          const resolvedId = await findOrCreateCategory(conn, catTable, level.targetColumn, crumb.text, parentCol, parentId, categoryCache, workspace.deltaLogPath, importRun.id, fieldsByTable.get(level.targetTable));
-          lastResolvedByTable.set(level.targetTable, resolvedId);
+          // Every higher level already resolved for this item is linked in (cat.id_list, item.id_list +
+          // item.id_cat, or a self-referencing id_parent) — without this the whole tree was flattened
+          // to id_list = id_cat = 0 and the site's menus/category pages showed nothing under any parent.
+          const parentLinks: Record<string, number> = {};
+          for (const [resolvedTable, resolvedId] of lastResolvedByTable) {
+            const col = linkColumnTo(catTable, resolvedTable, cfg.relations);
+            if (col) parentLinks[col] = resolvedId;
+          }
+          const resolvedId = await findOrCreateCategory(conn, catTable, level.targetColumn!, crumb.text, parentLinks, categoryCache, workspace.deltaLogPath, importRun.id, fieldsByTable.get(level.targetTable!), { href: crumb.href, itemUrl: item.url, tables: workspace.schema.tables });
+          lastResolvedByTable.set(level.targetTable!, resolvedId);
           const relation = cfg.relations.find(r => r.status === "confirmed" && r.sourceTable === mainTable && r.targetTable === level.targetTable);
           if (relation) mainValues[relation.sourceColumn] = String(resolvedId);
         }
@@ -474,37 +621,48 @@ export async function importCrawlRun(workspace: WorkspaceInfo, recipe: CrawlReci
         // 6. Insert main record + related/SEO/gallery rows inside one transaction. Delta records are
         // buffered and only written to disk after commit succeeds, so a rolled-back transaction never
         // leaves phantom entries in delta.sql.
-        const deltaBuffer: Array<{ table: string; columns: string[]; values: unknown[] }> = [];
+        const deltaBuffer: DeltaEntry[] = [];
+        const insertRow = async (table: string, cols: string[], vals: unknown[]) => {
+          const [res] = await conn.query(`INSERT INTO \`${table}\` (${cols.map(c => `\`${c}\``).join(",")}) VALUES (${cols.map(() => "?").join(",")})`, vals);
+          const id = (res as mysql.ResultSetHeader).insertId;
+          deltaBuffer.push({ table, columns: [...cols, "id"], values: [...vals, id] });
+          return id;
+        };
+        // Snapshots the rows first so rollback can put them back exactly as they were.
+        const deleteRows = async (table: string, where: string, params: unknown[]) => {
+          const [rows] = await conn.query(`SELECT * FROM \`${table}\` WHERE ${where}`, params);
+          for (const row of rows as Array<Record<string, unknown>>) {
+            await conn.query(`DELETE FROM \`${table}\` WHERE id = ?`, [row.id]);
+            deltaBuffer.push({ op: "delete", table, columns: ["id"], values: [row.id], before: row });
+          }
+        };
         await conn.beginTransaction();
         try {
           const isOverwrite = existingId != null && decision === "overwrite";
           const mainCols = Object.keys(mainValues).filter(c => mainValues[c] != null && c !== "id");
           let mainId: number;
           if (isOverwrite) {
+            const [beforeRows] = await conn.query(`SELECT * FROM \`${mainTable}\` WHERE id = ?`, [existingId]);
             await conn.query(
               `UPDATE \`${mainTable}\` SET ${mainCols.map(c => `\`${c}\`=?`).join(",")} WHERE id=?`,
               [...mainCols.map(c => mainValues[c]), existingId]
             );
             mainId = existingId!;
+            deltaBuffer.push({ op: "update", table: mainTable, columns: [...mainCols, "id"], values: [...mainCols.map(c => mainValues[c]), mainId], before: (beforeRows as Array<Record<string, unknown>>)[0] || null });
             // Overwrite fully regenerates dependent rows from this crawl rather than diffing them —
             // simpler and correct as long as gallery/SEO/related rows are always rebuilt from scratch,
             // which the code below already does unconditionally.
-            if (cfg.assets?.galleryTable) await conn.query(`DELETE FROM \`${cfg.assets.galleryTable.table}\` WHERE \`${cfg.assets.galleryTable.parentColumn}\` = ?`, [mainId]);
-            if (cfg.seo) await conn.query(`DELETE FROM \`${cfg.seo.seoTable}\` WHERE \`${cfg.seo.parentColumn}\` = ? AND \`${cfg.seo.comColumn}\` = ? AND \`${cfg.seo.actColumn}\` = ? AND \`${cfg.seo.typeColumn}\` = ?`, [mainId, cfg.seo.com, cfg.seo.act, cfg.seo.type]);
+            if (cfg.assets?.galleryTable) await deleteRows(cfg.assets.galleryTable.table, `\`${cfg.assets.galleryTable.parentColumn}\` = ?`, [mainId]);
+            if (cfg.seo) await deleteRows(cfg.seo.seoTable, `\`${cfg.seo.parentColumn}\` = ? AND \`${cfg.seo.comColumn}\` = ? AND \`${cfg.seo.actColumn}\` = ? AND \`${cfg.seo.typeColumn}\` = ?`, [mainId, cfg.seo.com, cfg.seo.act, cfg.seo.type]);
             for (const [relTable] of fieldsByTable) {
               if (relTable === mainTable || (cfg.seo && relTable === cfg.seo.seoTable)) continue;
               const rel = cfg.relations.find(r => r.status === "confirmed" && r.sourceTable === relTable && r.targetTable === mainTable);
-              if (rel) await conn.query(`DELETE FROM \`${relTable}\` WHERE \`${rel.sourceColumn}\` = ?`, [mainId]);
+              if (rel) await deleteRows(relTable, `\`${rel.sourceColumn}\` = ?`, [mainId]);
             }
           } else {
-            const [mainResult] = await conn.query(
-              `INSERT INTO \`${mainTable}\` (${mainCols.map(c => `\`${c}\``).join(",")}) VALUES (${mainCols.map(() => "?").join(",")})`,
-              mainCols.map(c => mainValues[c])
-            );
-            mainId = (mainResult as mysql.ResultSetHeader).insertId;
+            mainId = await insertRow(mainTable, mainCols, mainCols.map(c => mainValues[c]));
           }
           let insertedRows = 1;
-          deltaBuffer.push({ table: mainTable, columns: [...mainCols, "id"], values: [...mainCols.map(c => mainValues[c]), mainId] });
 
           // Related tables (excluding the SEO table) with a parent-pointing confirmed relation.
           for (const [table, values] of fieldsByTable) {
@@ -515,12 +673,8 @@ export async function importCrawlRun(workspace: WorkspaceInfo, recipe: CrawlReci
             const cols = Object.keys(values).filter(c => values[c] != null);
             const insertCols = [relation.sourceColumn, ...cols];
             const insertVals: unknown[] = [mainId, ...cols.map(c => values[c])];
-            await conn.query(
-              `INSERT INTO \`${table}\` (${insertCols.map(c => `\`${c}\``).join(",")}) VALUES (${insertCols.map(() => "?").join(",")})`,
-              insertVals
-            );
+            await insertRow(table, insertCols, insertVals);
             insertedRows++;
-            deltaBuffer.push({ table, columns: insertCols, values: insertVals });
           }
 
           // Gallery: one row per successfully downloaded image, all pointing at the same parent. Any
@@ -535,12 +689,8 @@ export async function importCrawlRun(workspace: WorkspaceInfo, recipe: CrawlReci
             for (const row of galleryRows) {
               const insertCols = [parentColumn, pathColumn, ...extraCols];
               const insertVals: unknown[] = [mainId, row.value, ...extraCols.map(c => extra[c])];
-              await conn.query(
-                `INSERT INTO \`${table}\` (${insertCols.map(c => `\`${c}\``).join(",")}) VALUES (${insertCols.map(() => "?").join(",")})`,
-                insertVals
-              );
+              await insertRow(table, insertCols, insertVals);
               insertedRows++;
-              deltaBuffer.push({ table, columns: insertCols, values: insertVals });
             }
           }
 
@@ -551,30 +701,43 @@ export async function importCrawlRun(workspace: WorkspaceInfo, recipe: CrawlReci
             // Prefer an actual "desc"-prefixed column (a short description) over a "content" column
             // (the full article/product body) — falling back to content only when no desc column
             // exists at all, and always as plain text: a raw HTML blob must never land in a meta tag.
-            const descCol = pickColumnWithValue(mainSchema, /^desc/i, mainValues) || pickColumnWithValue(mainSchema, /^content/i, mainValues);
-            const title = seoData.title || seoData.ogTitle || (nameCol && mainValues[nameCol] ? stripHtmlToText(mainValues[nameCol]!, 70) : null) || null;
-            const description = seoData.description || seoData.ogDescription || (descCol && mainValues[descCol] ? stripHtmlToText(mainValues[descCol]!, 160) : null) || null;
-            const keywords = seoData.keywords || null;
+            // pickColumnWithValue falls back to a column *name* even when that column is empty for this
+            // item, so "desc column exists but is blank" used to stop the chain before content was tried
+            // — every product without a short description ended up with a NULL meta description.
+            const textOf = (pattern: RegExp, max: number) => {
+              const col = pickColumnWithValue(mainSchema, pattern, mainValues);
+              const text = col && mainValues[col] ? stripHtmlToText(mainValues[col]!, max) : "";
+              return text || null;
+            };
+            const clean = (s: string | null | undefined) => (s || "").replace(/\s+/g, " ").trim() || null;
+            const title = clean(seoData.title) || clean(seoData.ogTitle) || (nameCol && mainValues[nameCol] ? stripHtmlToText(mainValues[nameCol]!, 70) : null) || null;
+            const description = clean(seoData.description) || clean(seoData.ogDescription) || textOf(/^desc/i, 160) || textOf(/^content/i, 160);
+            const keywords = clean(seoData.keywords);
             const insertCols = [cfg.seo.parentColumn, cfg.seo.comColumn, cfg.seo.actColumn, cfg.seo.typeColumn];
             const insertVals: unknown[] = [mainId, cfg.seo.com, cfg.seo.act, cfg.seo.type];
             if (cfg.seo.titleColumn) { insertCols.push(cfg.seo.titleColumn); insertVals.push(title); }
             if (cfg.seo.descriptionColumn) { insertCols.push(cfg.seo.descriptionColumn); insertVals.push(description); }
             if (cfg.seo.keywordsColumn) { insertCols.push(cfg.seo.keywordsColumn); insertVals.push(keywords); }
-            deltaBuffer.push({ table: cfg.seo.seoTable, columns: insertCols, values: insertVals });
-            await conn.query(
-              `INSERT INTO \`${cfg.seo.seoTable}\` (${insertCols.map(c => `\`${c}\``).join(",")}) VALUES (${insertCols.map(() => "?").join(",")})`,
-              insertVals
-            );
+            await insertRow(cfg.seo.seoTable, insertCols, insertVals);
             insertedRows++;
           }
 
           await conn.commit();
-          for (const d of deltaBuffer) await logDelta(workspace.deltaLogPath, d.table, d.columns, d.values, importRun.id);
+          for (const d of deltaBuffer) await logDelta(workspace.deltaLogPath, d, importRun.id);
           result.status = isOverwrite ? "updated" : "inserted"; result.mainId = mainId;
           if (isOverwrite) importRun.updated++; else importRun.inserted++;
           importRun.insertedRows += insertedRows;
         } catch (error) {
           await conn.rollback();
+          // Non-transactional tables (MyISAM — the norm for these PHP CMS schemas) keep whatever was
+          // written before the failure; those rows still go into the log so this run's rollback can
+          // remove them instead of leaving untraceable orphans.
+          for (const d of deltaBuffer) {
+            if ((d.op || "insert") !== "insert") { await logDelta(workspace.deltaLogPath, d, importRun.id); continue; }
+            const id = d.values[d.columns.indexOf("id")];
+            const [still] = await conn.query(`SELECT id FROM \`${d.table}\` WHERE id = ? LIMIT 1`, [id]).catch(() => [[]]);
+            if ((still as unknown[]).length) await logDelta(workspace.deltaLogPath, d, importRun.id);
+          }
           throw error;
         }
       } catch (error) {
@@ -591,9 +754,6 @@ export async function importCrawlRun(workspace: WorkspaceInfo, recipe: CrawlReci
     }
   } finally {
     await conn.end();
+    await assetStore.saveIndex().catch(() => {});
   }
-
-  importRun.completedAt = new Date().toISOString();
-  await persist();
-  return importRun;
 }

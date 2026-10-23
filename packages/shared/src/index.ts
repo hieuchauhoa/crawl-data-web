@@ -191,7 +191,7 @@ export type CrawlQueueItem = {
   // select on the item's own detail page at all.
   listFields?: Record<string, string | null>;
   extracted?: {
-    fields: Record<string,string|null>; seo: SeoData; breadcrumb: Array<{ index: number; text: string }>;
+    fields: Record<string,string|null>; seo: SeoData; breadcrumb: Array<{ index: number; text: string; href?: string | null }>;
     galleryCandidates: string[];
   };
 };
@@ -248,6 +248,8 @@ export type ImportRun = {
   // run record (rather than deleting the run itself) so the operator still has a record of what
   // happened and can't accidentally roll it back twice.
   rolledBack?: boolean;
+  // The server stopped while this run was still writing; only part of the queue was imported.
+  interrupted?: boolean;
 };
 
 // A conflict is a crawled item whose configured match columns already match an existing row. The

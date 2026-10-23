@@ -7,10 +7,10 @@ import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import type { BridgeEvent, CrawlRecipe, ImportDecision, RelationSuggestion, WorkspaceConfig } from "@crawl/shared";
 import { config } from "./config.js";
-import { exportWorkspace, importSqlUpload, readTableRows, resetWorkspace, testMariaDb } from "./db.js";
+import { exportWorkspace, importSqlUpload, readTableRows, resetWorkspace, suggestRelations, testMariaDb } from "./db.js";
 import { applyBridgeEvent, clearDatabase, deleteRecipe, findRecipeForUrl, getState, incrementDelta, initState, saveRecipe, setDatabase, setWorkspaceConfig, updateWorkspaceSchema } from "./state.js";
 import { deleteCrawlRun, getCrawlRuntime, initCrawlRuntime, pauseCrawl, resumeCrawl, retryFailed, startCrawl } from "./crawl.js";
-import { deleteImportRun, getImportRun, getImportRuns, importCrawlRun, initMappingRuntime, previewImportConflicts, rollbackImportRun } from "./mapping.js";
+import { activeImportOperation, deleteImportRun, getImportRun, getImportRuns, importCrawlRun, initMappingRuntime, previewImportConflicts, rollbackImportRun } from "./mapping.js";
 import { buildExportBundle } from "./export.js";
 
 // A Recipe id embeds its hostname (see freshRecipe() in the extension), and for a file:// test page
@@ -201,6 +201,23 @@ app.delete("/api/workspace/relations/:id", async (request, reply) => {
   return { ok: true, relations };
 });
 
+// Confirms every same-family link among the selected tables in one go (product.id_list -> product_list,
+// product_cat.id_list -> product_list, product_item.id_cat -> product_cat, ...), so the category
+// hierarchy is explicit in the relation list instead of left for the operator to work out.
+app.post("/api/workspace/relations/auto", async (_request, reply) => {
+  const workspace = getState().database;
+  if (!workspace) return reply.code(409).send({ ok: false, error: "Chưa có workspace." });
+  const selected = new Set([workspace.config.mainTable, ...workspace.config.relatedTables].filter((t): t is string => !!t));
+  workspace.schema.relations = suggestRelations(workspace.schema.tables);
+  const existing = workspace.config.relations;
+  const added: RelationSuggestion[] = workspace.schema.relations
+    .filter(r => r.confidence >= 0.97 && selected.has(r.sourceTable) && selected.has(r.targetTable))
+    .filter(r => !existing.some(e => e.sourceTable === r.sourceTable && e.sourceColumn === r.sourceColumn))
+    .map(r => ({ ...r, id: `auto_${r.sourceTable}.${r.sourceColumn}`, status: "confirmed" as const }));
+  await setWorkspaceConfig({ ...workspace.config, relations: [...existing, ...added] });
+  return { ok: true, added: added.length, relations: workspace.config.relations };
+});
+
 app.put("/api/workspace/relations/:id", async (request, reply) => {
   const workspace = getState().database;
   if (!workspace) return reply.code(409).send({ ok: false, error: "Chưa có workspace." });
@@ -328,6 +345,7 @@ app.post("/api/import/:id/rollback", async (request, reply) => {
   const run = getImportRun(id);
   if (!run) return reply.code(404).send({ ok: false, error: "Import run không tồn tại." });
   if (run.rolledBack) return reply.code(409).send({ ok: false, error: "Lần import này đã được xoá trước đó." });
+  if (!run.completedAt || activeImportOperation()) return reply.code(409).send({ ok: false, error: "Đang có Import/xoá dữ liệu chạy — chờ xong rồi thử lại." });
   try {
     const result = await rollbackImportRun(workspace, run);
     return { ok: true, result };
@@ -365,6 +383,7 @@ app.post("/api/import/from-crawl/:runId", async (request, reply) => {
   if (!crawlRun.queue.some(q => q.status === "success")) return reply.code(409).send({ ok: false, error: "Crawl run chưa có item nào thành công." });
   const recipe = getState().recipes.find(r => r.id === crawlRun.recipeId);
   if (!recipe) return reply.code(404).send({ ok: false, error: "Recipe không tồn tại." });
+  if (activeImportOperation()) return reply.code(409).send({ ok: false, error: "Đang có Import/xoá dữ liệu chạy — chờ xong rồi thử lại." });
   try {
     const result = await importCrawlRun(workspace, recipe, crawlRun, body?.decisions);
     if (result.insertedRows) await incrementDelta(result.insertedRows);

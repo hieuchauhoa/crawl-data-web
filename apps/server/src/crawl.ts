@@ -141,7 +141,16 @@ async function seo(page:Page):Promise<SeoData>{
 async function extractBreadcrumb(page:Page, recipe:CrawlRecipe){
   const levels = recipe.list.breadcrumb.filter(l => !l.ignored && selector(l.selector));
   const texts = await Promise.all(levels.map(l => page.locator(selector(l.selector)!).first().textContent({ timeout: OPTIONAL_LOOKUP_TIMEOUT }).catch(() => null)));
-  return levels.map((l, i) => ({ index: l.index, text: texts[i]?.trim() || "" })).filter(b => b.text);
+  // The crumb's own link lets the importer recognise "this crumb is the item itself" even when its text
+  // differs from the mapped name column — the name-equality check alone misses that case.
+  const hrefs = await Promise.all(levels.map(l => page.locator(selector(l.selector)!).first()
+    .evaluate(e => (e.tagName === "A" ? e : e.querySelector("a[href]"))?.getAttribute("href") ?? null, undefined, { timeout: OPTIONAL_LOOKUP_TIMEOUT }).catch(() => null)));
+  const base = page.url();
+  return levels.map((l, i) => {
+    let href: string | null = null;
+    try { href = hrefs[i] ? new URL(hrefs[i]!, base).href : null; } catch {}
+    return { index: l.index, text: texts[i]?.replace(/\s+/g, " ").trim() || "", href };
+  }).filter(b => b.text);
 }
 // Best-effort image candidate resolution (src/srcset/data-src/data-original/parent-link), capped to
 // a handful so a missing/broken gallery or avatar selector never balloons download work.

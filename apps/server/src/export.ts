@@ -23,10 +23,18 @@ async function buildDeltaSql(deltaLogPath: string): Promise<string> {
   const statements: string[] = [];
   for (const line of lines) {
     try {
-      const rec = JSON.parse(line) as { table: string; columns: string[]; values: unknown[] };
-      const cols = rec.columns.map(c => `\`${c}\``).join(",");
-      const vals = rec.values.map(sqlLiteral).join(",");
-      statements.push(`INSERT INTO \`${rec.table}\` (${cols}) VALUES (${vals});`);
+      const rec = JSON.parse(line) as { table: string; columns: string[]; values: unknown[]; op?: "insert" | "update" | "delete" };
+      const idIndex = rec.columns.indexOf("id");
+      if (rec.op === "delete" && idIndex >= 0) {
+        statements.push(`DELETE FROM \`${rec.table}\` WHERE \`id\` = ${sqlLiteral(rec.values[idIndex])};`);
+      } else if (rec.op === "update" && idIndex >= 0) {
+        const sets = rec.columns.map((c, i) => (c === "id" ? null : `\`${c}\` = ${sqlLiteral(rec.values[i])}`)).filter(Boolean).join(", ");
+        statements.push(`UPDATE \`${rec.table}\` SET ${sets} WHERE \`id\` = ${sqlLiteral(rec.values[idIndex])};`);
+      } else {
+        const cols = rec.columns.map(c => `\`${c}\``).join(",");
+        const vals = rec.values.map(sqlLiteral).join(",");
+        statements.push(`INSERT INTO \`${rec.table}\` (${cols}) VALUES (${vals});`);
+      }
     } catch { /* skip a malformed line rather than fail the whole export */ }
   }
   return `${statements.join("\n")}\n`;
