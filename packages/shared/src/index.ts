@@ -69,6 +69,10 @@ export type RecipeField = {
   // relative to the repeated item (like avatar/detailUrl already are) and its value is read once per
   // item while the list pages are discovered, the same way avatar/detailUrl already work.
   scope?: "list" | "detail";
+  // Name of another column in the same target table: when this field's own value comes out empty
+  // (e.g. an "old price" selector on a product that has no old price), the value of that column is
+  // used instead (the product's only price). Resolved at import time, so no re-crawl is needed.
+  fallbackColumn?: string | null;
 };
 
 export type ImageCandidate = {

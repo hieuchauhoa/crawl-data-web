@@ -9,6 +9,7 @@
   --warning:#9a5b00; --warning-tint:#fbf3e3;
   --shadow-sm:0 1px 2px rgba(0,0,0,.04); --shadow-float:0 12px 32px rgba(0,0,0,.08);
   --radius:12px; --radius-sm:8px;
+  color-scheme:light;
   font-family:var(--font); font-synthesis:none; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
 }
 *{box-sizing:border-box}
@@ -302,4 +303,6 @@ th{color:var(--text-tertiary); font-weight:600}
   --success:#3dd371; --success-tint:rgba(61,211,113,.13);
   --danger:#ff5449; --danger-tint:rgba(255,84,73,.13);
   --warning:#e0a336; --warning-tint:rgba(224,163,54,.13);
+  color-scheme:dark;
 }
+select option,select optgroup{background:var(--surface); color:var(--text)}

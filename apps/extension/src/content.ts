@@ -162,12 +162,13 @@ function boot() {
 
     const sharedVars = `
       :host{
-        all:initial;
+        all:initial; color-scheme:light;
         --hud-bg:rgba(255,255,255,.85); --hud-head-bg:rgba(255,255,255,.7); --hud-text:#1d1d1f; --hud-muted:#68686d;
         --hud-border:rgba(0,0,0,.1); --hud-divider:rgba(0,0,0,.08); --hud-surface:#f5f5f5; --hud-input-bg:rgba(255,255,255,.6);
-        --hud-accent:#0066cc; --hud-success:#1a7f43; --hud-success-tint:#eaf7ee; --hud-danger:#c4291a; --hud-danger-tint:#fbeeed;
+        --hud-option-bg:#ffffff; --hud-accent:#0066cc; --hud-success:#1a7f43; --hud-success-tint:#eaf7ee; --hud-danger:#c4291a; --hud-danger-tint:#fbeeed;
       }
       @media (prefers-color-scheme:dark){:host{
+        color-scheme:dark; --hud-option-bg:#2a2a2c;
         --hud-bg:rgba(30,30,32,.85); --hud-head-bg:rgba(30,30,32,.7); --hud-text:#f2f2f3; --hud-muted:#9a9a9e;
         --hud-border:rgba(255,255,255,.14); --hud-divider:rgba(255,255,255,.1); --hud-surface:rgba(255,255,255,.06); --hud-input-bg:rgba(255,255,255,.08);
         --hud-accent:#409cff; --hud-success:#3dd371; --hud-success-tint:rgba(61,211,113,.15); --hud-danger:#ff6259; --hud-danger-tint:rgba(255,84,73,.15);
@@ -195,6 +196,7 @@ function boot() {
       .success{background:var(--hud-success-tint);color:var(--hud-success);border-left-color:var(--hud-success)}.card{border-top:1px solid var(--hud-divider);padding-top:10px;margin-top:12px}.card b{display:block;margin-bottom:5px;font-weight:650}
       button,select,input{width:100%;font:13px inherit;border:1px solid var(--hud-border);border-radius:8px;background:var(--hud-input-bg);padding:9px 10px;color:var(--hud-text);min-height:38px}
       button{cursor:pointer;font-weight:600;text-align:center;transition:background .12s}
+      select option{background:var(--hud-option-bg);color:var(--hud-text)}
       button.primary{background:var(--hud-accent);border-color:var(--hud-accent);color:#fff}
       button.pick{background:var(--hud-input-bg);border-color:var(--hud-border);color:var(--hud-accent)}button.pick:hover{background:var(--hud-surface)}
       button.ghost{background:transparent;border-color:transparent;color:var(--hud-muted)}button.ghost:hover{color:var(--hud-text)}

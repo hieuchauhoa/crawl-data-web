@@ -140,6 +140,21 @@ function DefaultValueEditor({ recipe, db, onSaved }: { recipe: CrawlRecipe; db: 
           onRemove={() => removeDefault(f.id)} />
       : <div key={f.id} className="default-value-row"><code>{f.targetTable}.{f.targetColumn}</code><span>{f.source === "generated" ? "Ngày giờ hiện tại" : f.sampleValue}</span><button className="small danger" disabled={busy} onClick={() => removeDefault(f.id)}>Xóa</button></div>
     )}</div>}
+    {recipe.detail.fields.some(f => f.source === "dom") && <div className="default-value-list" style={{ marginTop: 10 }}>
+      <div className="small">Dự phòng khi trống: nếu sản phẩm không có giá trị ở cột bên trái (vd. không có giá cũ), tự lấy từ cột được chọn (vd. giá bán).</div>
+      {recipe.detail.fields.filter(f => f.source === "dom").map(f => <div key={f.id} className="default-value-row">
+        <code>{f.targetTable}.{f.targetColumn}</code>
+        <span>nếu trống → lấy từ</span>
+        <select value={f.fallbackColumn || ""} disabled={busy} onChange={async e => {
+          setBusy(true); setErr("");
+          try { await saveFields(recipe.detail.fields.map(x => x.id === f.id ? { ...x, fallbackColumn: e.target.value || null } : x)); await onSaved(); }
+          catch (er) { setErr(er instanceof Error ? er.message : String(er)); } finally { setBusy(false); }
+        }}>
+          <option value="">— Không dự phòng —</option>
+          {(db.schema.tables.find(t => t.name === f.targetTable)?.columns || []).filter(c => c.name !== f.targetColumn).map(c => <option key={c.name}>{c.name}</option>)}
+        </select>
+      </div>)}
+    </div>}
     <div className="default-value-form">
       <select value={table} onChange={e => { setTable(e.target.value); setColumn(""); }}>{tables.map(t => <option key={t}>{t}</option>)}</select>
       <select value={column} onChange={e => setColumn(e.target.value)}><option value="">— Chọn cột —</option>{cols.map(c => <option key={c.name}>{c.name}</option>)}</select>

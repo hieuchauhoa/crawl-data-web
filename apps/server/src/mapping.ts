@@ -378,6 +378,14 @@ function buildMainValues(item: CrawlQueueItem, recipe: CrawlRecipe, schemaByName
     if (!fieldsByTable.has(f.targetTable)) fieldsByTable.set(f.targetTable, {});
     fieldsByTable.get(f.targetTable)![f.targetColumn] = value;
   }
+  // Second pass so a fallback can point at a column regardless of the order the fields were mapped in.
+  for (const f of recipe.detail.fields) {
+    if (!f.fallbackColumn) continue;
+    const values = fieldsByTable.get(f.targetTable);
+    if (!values || (values[f.targetColumn] ?? "") !== "") continue;
+    const fallback = values[f.fallbackColumn];
+    if (fallback != null && fallback !== "") values[f.targetColumn] = fallback;
+  }
   const mainValues = fieldsByTable.get(mainTable) || {};
   for (const slugCol of mainSchema.columns.filter(c => /slug/i.test(c.name))) {
     if (mainValues[slugCol.name]) continue;
