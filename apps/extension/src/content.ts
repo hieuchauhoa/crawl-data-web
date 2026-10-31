@@ -53,6 +53,10 @@ function boot() {
   // live off the dropdowns at widen time) so changing the dropdown in between can't silently redirect
   // a widen onto the wrong column.
   let lastFieldEl: Element | null = null;
+  // When on, the next field pick is read from the LIST page (per item card) even if the page the picker is on
+  // isn't the list page's exact path — for data such as an excerpt that the detail page never shows.
+  let fieldFromList = false;
+  const widenTrail: Element[] = [];
   let lastFieldItemEl: Element | null = null;
   let lastFieldTable = "";
   let lastFieldColumn = "";
@@ -252,7 +256,7 @@ function boot() {
     if (n === 4) {
       const p = recipe.list.pagination;
       return `<div class="help">Nếu trang có các nút 1, 2, 3… hãy click <b>cả cụm phân trang</b>. Nếu không thấy paging, chọn một phương án bên dưới.</div>
-        ${p.kind === "url-pattern" ? `<div class="notice success">✓ Đã hiểu phân trang: <span class="mono">${esc(p.pattern)}</span>${p.detectedMax?` · trang 1→${p.detectedMax}`:""}</div>` : p.kind === "none" && p.reason === "single-page" ? `<div class="notice success">✓ Đã đặt website chỉ có một trang.</div>` : ""}
+        ${p.kind === "click-next" ? `<div class="notice success">✓ Đã hiểu phân trang kiểu bấm nút trang kế (ajax)${p.detectedMax?` · thấy tới trang ${p.detectedMax}`:""}</div>` : p.kind === "url-pattern" ? `<div class="notice success">✓ Đã hiểu phân trang: <span class="mono">${esc(p.pattern)}</span>${p.detectedMax?` · trang 1→${p.detectedMax}`:""}</div>` : p.kind === "none" && p.reason === "single-page" ? `<div class="notice success">✓ Đã đặt website chỉ có một trang.</div>` : ""}
         <button class="pick" data-mode="pagination">Chọn cụm phân trang trên website</button>
         <div class="label">Nếu không có cụm paging</div>
         <button class="ghost" data-action="single-page">Website chỉ có một trang</button>
@@ -308,8 +312,10 @@ function boot() {
               : `<div class="notice success" style="margin-top:7px">Đã chọn: <b>${rangeStats.count}</b> phần tử${rangeStats.text ? ` (${esc(rangeStats.text)})` : ""}. Đã tô vùng highlight trên trang — kiểm tra đúng phạm vi mong muốn trước khi lưu.</div>`
             ) : ""}
             ${rangeStartEl && rangeEndEl ? `<div class="row" style="margin-top:7px"><button class="primary" data-action="save-range">Lưu vùng này</button><button class="ghost" data-action="clear-range">Chọn lại</button></div>` : ""}
-          ` : `<button class="pick" style="margin-top:8px" data-mode="field">Chọn dữ liệu trên website</button>
-            ${lastFieldEl && lastFieldTable===targetTable && lastFieldColumn===targetColumn ? `<div class="small" style="margin-top:6px">Click trúng bị hẹp hơn cả khung bao (VD dính vào 1 đoạn &lt;p&gt; con)? Bấm nút dưới để nới ra khung cha, xem preview bên dưới to dần tới khi đủ.</div><button class="ghost" style="margin-top:6px" data-action="widen-field">↑ Mở rộng lên cấp cha</button>` : ""}`}
+          ` : `<label class="option" style="margin-top:8px"><input type="checkbox" data-action="toggle-list-field" ${fieldFromList?"checked":""}><div><strong>Dữ liệu này nằm ở trang danh sách</strong><span>Dùng cho mô tả/tóm tắt chỉ hiện ở thẻ item ngoài danh sách, trang chi tiết không có. Click vào dữ liệu NẰM TRONG 1 item ở trang danh sách.</span></div></label>
+            ${fieldFromList && location.pathname !== recipe.source.listPath ? `<button class="ghost" style="margin-top:4px" data-action="open-list">→ Mở trang danh sách để chọn</button>` : ""}
+            <button class="pick" style="margin-top:8px" data-mode="field">Chọn dữ liệu trên website</button>
+            ${lastFieldEl && lastFieldTable===targetTable && lastFieldColumn===targetColumn ? `<div class="small" style="margin-top:6px">Chọn chưa đúng khung? Nới ra khung cha (tự bỏ qua các lớp bọc không đổi nội dung), hoặc để tool tự tìm khung nội dung chính của bài.</div><div class="row" style="margin-top:6px"><button class="ghost" data-action="widen-field">↑ Mở rộng lên cấp cha</button><button class="ghost" data-action="narrow-field">↓ Thu nhỏ</button></div><button class="ghost" style="margin-top:4px" data-action="main-content">✦ Tự chọn khung nội dung chính</button>` : ""}`}
           <div class="small" style="margin-top:7px">Đã map ${recipe.detail.fields.filter(f=>f.source==="dom").length} field từ trang này. Giá trị cố định / ngày giờ tự động: cấu hình ở Local Tool (Bước 3, mục "Giá trị mặc định cho cột"), không làm ở đây nữa.</div>
           ${recipe.detail.fields.filter(f=>f.source==="dom").slice().reverse().slice(0,8).map(f=>`<div class="mapped"><span class="check">✓ ${esc(f.targetColumn)}</span> ← ${esc(f.extraction)}${f.scope==="list"?' <span class="pill-tag">danh sách</span>':""}<div class="small">${esc((f.sampleValue||"").slice(0,90))}</div><button class="danger" data-delete-field="${esc(f.id)}" style="margin-top:5px;min-height:28px;padding:4px 7px;font-size:11px">Xóa field này</button></div>`).join("")}
           <div class="notice" style="margin-top:9px">Mục này thiếu trường nào so với mục khác? Cứ <b>mở một mục KHÁC</b> trên cùng website có trường đó rồi map tiếp — Tool tự nhận đúng Recipe này theo tên miền, dữ liệu map thêm sẽ cộng dồn vào cùng cấu hình, không tạo recipe mới.</div>
@@ -323,7 +329,7 @@ function boot() {
         ${summaryLine("Nhóm item", recipe.list.item ? `${recipe.list.itemCount} item` : "Chưa chọn", !!recipe.list.item)}
         ${summaryLine("Link chi tiết", recipe.list.detailUrl ? "Đã chọn" : "Chưa chọn", !!recipe.list.detailUrl)}
         ${summaryLine("Ảnh đại diện", recipe.list.avatar ? `${recipe.list.imageCandidates.length} candidate` : "Chưa chọn", !!recipe.list.avatar)}
-        ${summaryLine("Phân trang", p.kind === "url-pattern" ? p.pattern : p.kind === "none" && p.reason === "single-page" ? "Một trang" : "Chưa xác nhận", p.kind !== "none" || p.reason === "single-page")}
+        ${summaryLine("Phân trang", p.kind === "click-next" ? "Bấm nút trang kế" : p.kind === "url-pattern" ? p.pattern : p.kind === "none" && p.reason === "single-page" ? "Một trang" : "Chưa xác nhận", p.kind !== "none" || p.reason === "single-page")}
         ${summaryLine("Breadcrumb", recipe.list.breadcrumb.length ? `${recipe.list.breadcrumb.length} cấp` : "Chưa chọn / không dùng", true)}
         ${summaryLine("Gallery", recipe.detail.gallery ? `${recipe.detail.galleryCount} ảnh` : "Chưa chọn / không dùng", true)}
         ${summaryLine("Detail fields", `${recipe.detail.fields.length} field`, recipe.detail.fields.length > 0)}
@@ -420,9 +426,33 @@ function boot() {
       rangeStartEl = null; rangeEndEl = null; rangeStats = null; hideRangeOverlay();
       await save(false); render(); return;
     }
+    if (a === "toggle-list-field") { fieldFromList = !fieldFromList; render(); return; }
+    if (a === "open-list") { location.href = recipe.source.startUrl; return; }
+    if (a === "narrow-field") {
+      if (!lastFieldEl) { error = "Chưa có field nào để thu nhỏ."; render(); return; }
+      // Back toward the element the user actually clicked: the previous widen step is remembered.
+      const prev = widenTrail.pop();
+      if (!prev) { error = "Đang ở đúng vị trí đã click ban đầu."; render(); return; }
+      targetTable = lastFieldTable; targetColumn = lastFieldColumn;
+      applyFieldPick(prev, lastFieldItemEl, location.pathname === recipe.source.listPath);
+      await save(false); render(); return;
+    }
+    if (a === "main-content") {
+      if (!lastFieldEl) { error = "Hãy chọn dữ liệu trên website trước."; render(); return; }
+      const box = lastFieldEl.closest(MAIN_CONTENT_SELECTOR);
+      if (!box) { error = "Không thấy khung nội dung chính quen thuộc quanh vị trí này — dùng nút Mở rộng/Thu nhỏ."; render(); return; }
+      targetTable = lastFieldTable; targetColumn = lastFieldColumn;
+      widenTrail.push(lastFieldEl);
+      applyFieldPick(box, lastFieldItemEl, location.pathname === recipe.source.listPath);
+      await save(false); render(); return;
+    }
     if (a === "widen-field") {
       if (!lastFieldEl) { error = "Chưa có field nào để mở rộng — hãy chọn dữ liệu trên website trước."; render(); return; }
-      const parent = lastFieldEl.parentElement;
+      // Skip pure wrapper layers (same text as the child, e.g. div.col-inner > div.box): one click should
+      // visibly widen the selection, not silently climb a level with an identical preview.
+      let parent = lastFieldEl.parentElement;
+      const baseLen = clean(lastFieldEl.textContent || "").length;
+      while (parent && parent !== document.body && parent !== document.documentElement && clean(parent.textContent || "").length <= baseLen * 1.02 && parent.parentElement && parent.parentElement !== document.body && !(lastFieldItemEl && parent === lastFieldItemEl)) parent = parent.parentElement;
       if (!parent || parent === document.body || parent === document.documentElement) { error = "Đã tới giới hạn, không thể mở rộng thêm."; render(); return; }
       if (lastFieldItemEl && lastFieldEl === lastFieldItemEl) { error = "Đã tới đúng ranh giới của 1 item — mở rộng thêm sẽ lấy sang item khác, không hợp lý."; render(); return; }
       // Re-target the dropdowns to whatever column this field actually is, in case they were changed
@@ -430,6 +460,7 @@ function boot() {
       // stale selection here would otherwise silently widen the wrong column's field.
       targetTable = lastFieldTable; targetColumn = lastFieldColumn;
       const onListNow = location.pathname === recipe.source.listPath;
+      widenTrail.push(lastFieldEl);
       applyFieldPick(parent, lastFieldItemEl, onListNow);
       await save(false); render(); return;
     }
@@ -518,9 +549,11 @@ function boot() {
         // inside — the same way avatar/detailUrl are already scoped — so it can be re-found per item
         // during list discovery (see RecipeField.scope / discover() in crawl.ts). Off the list page
         // (the normal, detail-page case) this is unchanged: a plain document-scoped selector.
+        if (fieldFromList && location.pathname !== recipe.source.listPath) throw new Error("Đang bật 'Dữ liệu nằm ở trang danh sách' — hãy mở trang danh sách rồi chọn.");
         const onListNow = location.pathname === recipe.source.listPath;
         const itemEl = onListNow ? closestItem(target, recipe.list.item?.primary) : null;
         if (onListNow && !itemEl) throw new Error("Đang ở trang danh sách — hãy click vào dữ liệu NẰM TRONG 1 item, không click ở ngoài.");
+        widenTrail.length = 0;
         applyFieldPick(target, itemEl, onListNow);
       } else if (mode === "range-start") {
         rangeStartEl = target; rangeEndEl = null; rangeStats = null; hideRangeOverlay();
@@ -607,7 +640,12 @@ const VOLATILE_CLASS = /^(loaded|loading|lazyloaded|lazyload|active|hover(ed)?|s
 // widget libraries (Swiper, Slick, lazy-load, etc.) commonly stamp a fresh random-looking id onto an
 // element on every page load/init (e.g. "swiper-wrapper-a194c7d02a774515"), which only ever matches
 // the one sample page the Recipe was built from and silently matches nothing on every other page.
-const UNSTABLE_TOKEN_RE = /[0-9a-f]{8,}/i;
+// A run of 3+ digits ("post-11867", "product-123") is a per-record id/class (WordPress stamps the post id
+// onto <article id> and its classes): it matches only the one page the Recipe was built from, so every
+// other item silently matches nothing and the crawl "only gets one item".
+// Conventional wrappers for an article's actual body (excluding its title/meta/footer/nav siblings).
+const MAIN_CONTENT_SELECTOR = '.entry-content, [itemprop="articleBody"], .post-content, .article-content, .the-content, .single-content, .detail-content, .content-detail, .news-content, .product-content, .blog-content';
+const UNSTABLE_TOKEN_RE = /[0-9a-f]{8,}|\d{3,}/i;
 function isStableId(id: string) { return id.length > 0 && !UNSTABLE_TOKEN_RE.test(id); }
 function simpleSelector(el: Element, generalize = false) {
   // Classes on <html>/<body> are mostly stamped by scripts at runtime (OS/feature detection such as
@@ -760,6 +798,15 @@ async function fetchSampleUrls(recipe: CrawlRecipe): Promise<string[]> {
 }
 function inferPagination(urls:string[],container:SelectorStrategy|null):PaginationRecipe{
   const parsed=urls.map(u=>new URL(u,location.href));
+  // Ajax paginators (e.g. Flatsome ux-relay) render page links as "#/page/N" anchors: every link points at
+  // the same document and only the hash differs, so no URL ever serves page N on its own — the crawler
+  // has to click "next" instead (see clickNextPage on the server).
+  const base=parsed[0]!;const sameDoc=(u:URL)=>u.origin+u.pathname+u.search===base.origin+base.pathname+base.search;
+  const hashOnly=parsed.length>=2&&parsed.every(u=>u.hash.length>1&&sameDoc(u));
+  if(hashOnly||(parsed.length===2&&parsed[1]!.hash.length>1&&sameDoc(parsed[1]!)&&base.hash!==parsed[1]!.hash)){
+    const nums=parsed.map(u=>u.hash.match(/(\d+)(?!.*\d)/)?.[1]).filter((x):x is string=>!!x).map(Number);
+    return{kind:"click-next",container,detectedMax:nums.length?Math.max(...nums):null,sampleUrls:urls};
+  }
   // Path-based numbering is checked FIRST, ahead of a numeric query parameter — a changing filename
   // (page-2.html, page-3.html) is what actually serves different content on plenty of sites (static
   // mirrors especially), whereas a numeric query key can vary for reasons that have nothing to do with

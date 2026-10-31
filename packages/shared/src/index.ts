@@ -95,6 +95,9 @@ export type BreadcrumbLevel = {
 export type PaginationRecipe =
   | { kind: "none"; reason: "single-page" | "not-visible"; page2Url: string | null }
   | { kind: "url-pattern"; container: SelectorStrategy | null; pattern: string; start: number; detectedMax: number | null; sampleUrls: string[] }
+  // Ajax pagination whose links are only "#/page/N" hash anchors (e.g. Flatsome ux-relay): the URL never
+  // serves page N by itself, so the crawler has to click the "next" control and wait for the list to change.
+  | { kind: "click-next"; container: SelectorStrategy | null; detectedMax: number | null; sampleUrls: string[] }
   | { kind: "load-more"; container: SelectorStrategy | null }
   | { kind: "infinite-scroll"; container: SelectorStrategy | null };
 

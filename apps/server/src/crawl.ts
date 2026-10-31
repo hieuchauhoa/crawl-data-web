@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { chromium, type Browser, type Page } from "playwright";
-import type { CrawlRecipe, CrawlRun, CrawlRuntimeState, CrawlQueueItem, RecipeField, SelectorStrategy, SeoData } from "@crawl/shared";
+import type { CrawlRecipe, CrawlRun, CrawlRuntimeState, CrawlQueueItem, RecipeField, PaginationRecipe, SelectorStrategy, SeoData } from "@crawl/shared";
 import { phase3Dir } from "./config.js";
 
 const statePath = path.join(phase3Dir, "crawl-state.json");
@@ -93,7 +93,9 @@ const VOLATILE_CLASS_RE = /\.(?:loaded|loading|lazyloaded|lazyload|active|hovere
 function selector(s:SelectorStrategy|null){
   const raw = s?.primary || s?.fallback?.[0] || null;
   if (!raw) return null;
-  const stripped = raw.replace(VOLATILE_CLASS_RE, "").trim();
+  // Same tolerance for per-record ids/classes baked in by older picks ("#post-11867", ".post-11867"):
+  // an id becomes a prefix match, a numbered class is dropped, so the selector fits every item.
+  const stripped = raw.replace(VOLATILE_CLASS_RE, "").replace(/#([A-Za-z][\w-]*?)-\d{3,}(?![\w-])/g, '[id^="$1-"]').replace(/\.[A-Za-z][\w-]*?-\d{3,}(?![\w-])/g, "").trim();
   return stripped || raw;
 }
 function inferredPattern(recipe:CrawlRecipe){ const p=recipe.list.pagination; if(p.kind!=="none" || !p.page2Url) return null; try { const a=new URL(recipe.source.startUrl), b=new URL(p.page2Url,a); for(const [k,v] of b.searchParams){ if(a.searchParams.get(k)!==v && /^\d+$/.test(v)){ const t=new URL(b); t.searchParams.set(k,"{page}"); return t.toString().replace("%7Bpage%7D","{page}"); } } const ma=a.pathname.match(/(\d+)(?!.*\d)/), mb=b.pathname.match(/(\d+)(?!.*\d)/); if(mb && (!ma || ma[1]!==mb[1])) return b.toString().replace(mb[1]!,"{page}"); } catch {} return null; }
@@ -257,6 +259,29 @@ async function extractDetail(page:Page, recipe:CrawlRecipe){
   recipe.detail.fields.forEach((f, i) => { fields[`${f.targetTable}.${f.targetColumn}`] = fieldValues[i]!; });
   return { fields, seo: seoData, breadcrumb, galleryCandidates };
 }
+// Clicks the "next page" control of an ajax paginator: an explicit next/rel=next link inside the picked
+// pagination container if there is one, else the number link following the current page's number.
+// Deliberately written without inner helper functions (see the __name hazard noted in discover below).
+async function clickNextPage(p:Page, containerSel:string|null):Promise<boolean> {
+  return p.evaluate((cs: string | null) => {
+    // Runs in the browser; the server's tsconfig has no DOM lib, hence the loose types.
+    const doc = (globalThis as any).document;
+    const root = cs ? doc.querySelector(cs) : doc;
+    if (!root) return false;
+    let el = root.querySelector('a.next, a[rel="next"], li.next a, .next a, a.next-page') as any;
+    if (!el) {
+      const cur: any = root.querySelector('[aria-current], .current, .active');
+      const n = cur ? parseInt((cur.textContent || "").trim(), 10) : NaN;
+      if (!isNaN(n)) {
+        const links: any[] = Array.from(root.querySelectorAll('a'));
+        for (let i = 0; i < links.length; i++) { if (parseInt((links[i].textContent || "").trim(), 10) === n + 1) { el = links[i]; break; } }
+      }
+    }
+    if (!el) return false;
+    el.click();
+    return true;
+  }, containerSel).catch(() => false);
+}
 async function discover(run:CrawlRun, recipe:CrawlRecipe){ run.status="discovering"; await persist(); const b=browser ||= await chromium.launch({headless:true}); const p=await b.newPage(); try { const inferred=inferredPattern(recipe);
     // detectedMax is only ever a guess from whichever page-number links happened to be clickable in the
     // pagination cluster at pick time — the site's CURRENT page number is frequently rendered as plain
@@ -264,15 +289,27 @@ async function discover(run:CrawlRun, recipe:CrawlRecipe){ run.status="discoveri
     // page N under-counts by however many pages aren't the first. Real stopping already happens below
     // from the page's actual content (empty page, HTTP error, or an identical item set to the page
     // before) — detectedMax is never trustworthy enough to use as a hard ceiling on top of that.
-    const max=recipe.list.pagination.kind==="url-pattern"?100:(inferred?100:1); let previousSet=""; for(let n=1;n<=max;n++){ if(abortRequested.has(run.id)) return; const url=pageUrl(recipe,n); if(!url) break; log(run,"list",`Discover page ${n}`,url);
+    const clickMode=recipe.list.pagination.kind==="click-next"; const max=recipe.list.pagination.kind==="url-pattern"||clickMode?100:(inferred?100:1); let previousSet=""; for(let n=1;n<=max;n++){ if(abortRequested.has(run.id)) return; const url=clickMode?recipe.source.startUrl:pageUrl(recipe,n); if(!url) break; log(run,"list",`Discover page ${n}`,url);
       // Probing past the real last page now happens on every url-pattern site (see the comment on
       // `max` above) — for a file:// mirror that page simply doesn't exist on disk, which Playwright
       // reports as a thrown navigation error (net::ERR_FILE_NOT_FOUND), not a resp.status() the check
       // below can see. That's expected here, not a real failure: treat it the same as "page not found"
       // and stop discovery, instead of letting it fail the whole run.
       let resp: Awaited<ReturnType<typeof gotoWithBackoff>>;
+      if (clickMode && n>1) {
+        // Same document, no navigation: click "next" and wait until the item links actually change.
+        const iSel0=selector(recipe.list.item), dSel0=selector(recipe.list.detailUrl); const pg=recipe.list.pagination as Extract<PaginationRecipe,{kind:"click-next"}>;
+        const snap=() => p.locator(iSel0!).evaluateAll((els, ds) => els.map(e => e.querySelector(ds)?.getAttribute("href") || "").join("|"), dSel0!).catch(() => "");
+        const before=await snap();
+        if(!(await clickNextPage(p, pg.container?selector(pg.container):null))) break;
+        let changed=false; for(let t=0;t<30;t++){ await p.waitForTimeout(500); const now=await snap(); if(now&&now!==before){ changed=true; break; } }
+        if(!changed) break; await p.waitForTimeout(300);
+        resp=null as unknown as typeof resp; run.discoveredPages=n;
+      } else {
       try { resp = await gotoWithBackoff(p,url,run,"list"); } catch { break; }
-      run.discoveredPages=n; if(!resp||resp.status()>=400) break; const itemSel=selector(recipe.list.item), detailSel=selector(recipe.list.detailUrl), avatarSel=selector(recipe.list.avatar); if(!itemSel||!detailSel) throw new Error("Recipe thiếu item/detail selector");
+      run.discoveredPages=n; if(!resp||resp.status()>=400) break;
+      }
+ const itemSel=selector(recipe.list.item), detailSel=selector(recipe.list.detailUrl), avatarSel=selector(recipe.list.avatar); if(!itemSel||!detailSel) throw new Error("Recipe thiếu item/detail selector");
       // "list"-scoped fields (see RecipeField.scope) are read here, once per item, the same way
       // avatar/detailUrl already are — the only chance to read them, since some sites never repeat a
       // field (an excerpt, a category label) on the item's own detail page at all.
